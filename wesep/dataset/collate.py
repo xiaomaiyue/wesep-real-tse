@@ -57,10 +57,22 @@ BASE_COLLECT_KEYS = {
         "align": "min",
         "as_tensor": True,
     },
+
+    # ===== Text cue (precomputed embedding, fixed-size vector) =====
+    "text_aux": {
+        "source": "dataset",
+        "key_tpl": "text_spk{}",
+        "axis": "spk",
+        "required": False,
+        # all vectors share the same dim -> align is a no-op
+        "align": "min",
+        "as_tensor": True,
+    },
 }
 
 AUX_KEY_MAP = {
     "audio": "audio_aux",
+    "text": "text_aux",
 }
 
 

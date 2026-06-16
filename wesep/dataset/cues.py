@@ -3,6 +3,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 from wesep.dataset import processor_speaker
+from wesep.dataset import processor_text
 from wesep.utils.file_utils import load_yaml
 
 # ---------------------------
@@ -126,5 +127,52 @@ def build_speaker_cue(dataset, cue_conf, state, configs):
                 noise_lmdb_file,
                 noise_enroll_prob,
             )
+
+    return dataset
+
+
+# ---------------------------
+# text cue (semantic)
+# ---------------------------
+@register_cue("text")
+def build_text_cue(dataset, cue_conf, state, configs):
+    """
+    Text cue: precomputed transcript/keyword/summary embeddings.
+
+    cues.yaml example:
+      text:
+        type: embedding
+        guaranteed: true
+        scope: speaker
+        policy:
+          type: fixed
+          key: mix_spk_id
+          resource: .../train-100.text_oracle.json
+          embeddings: .../emb/minilm/embeddings.npz
+    """
+    required = cue_conf.get("required", True)
+    scope = cue_conf.get("scope", "speaker")
+
+    policy_conf = cue_conf.get("policy", {})
+    policy_type = policy_conf.get("type", None)  # only "fixed" for now
+    key_field = policy_conf.get("key", None)
+    resource_path = policy_conf.get("resource", None)
+    emb_path = policy_conf.get("embeddings", None)
+
+    if (policy_type is None or key_field is None or resource_path is None
+            or emb_path is None):
+        raise ValueError(f"Invalid text cue policy config: {policy_conf}")
+
+    if policy_type == "fixed":
+        dataset = dataset.apply(
+            processor_text.attach_fixed_text_cue,
+            resource_path,
+            emb_path,
+            key_field=key_field,
+            scope=scope,
+            required=required,
+        )
+    else:
+        raise ValueError(f"Unknown text cue policy type: {policy_type}")
 
     return dataset

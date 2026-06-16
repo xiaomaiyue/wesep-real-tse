@@ -1,8 +1,16 @@
+import os
+import tempfile
+
+os.environ.setdefault("NUMBA_CACHE_DIR",
+                      os.path.join(tempfile.gettempdir(), "wesep_numba_cache"))
+
 import torch
 import torch.nn as nn
 import torchaudio.compliance.kaldi as kaldi
 
-from wespeaker.models.speaker_model import get_speaker_model
+# NOTE: `get_speaker_model` is imported lazily inside SpeakerEncoder.__init__
+# so text-only / non-speaker-cue configs do not require the wespeaker package
+# at import time.
 
 
 class Fbank_kaldi(nn.Module):
@@ -99,6 +107,7 @@ class SpeakerEncoder(nn.Module):
             freeze = conf.get("freeze", False)
 
         # 1. build model
+        from wespeaker.models.speaker_model import get_speaker_model
         self.spk_model = get_speaker_model(model_name)(**spk_args)
 
         # 2. load pretrained if provided

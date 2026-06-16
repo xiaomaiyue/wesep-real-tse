@@ -101,6 +101,11 @@ class Extractor:
     def extract_speech_from_pcm(self, pcm_mix: torch.Tensor,
                                 sample_rate_mix: int, pcm_enroll: torch.Tensor,
                                 sample_rate_enroll: int):
+        if pcm_mix.size(0) > 1:
+            pcm_mix = pcm_mix.mean(dim=0, keepdim=True)
+        if pcm_enroll.size(0) > 1:
+            pcm_enroll = pcm_enroll.mean(dim=0, keepdim=True)
+
         if self.apply_vad:
             # TODO(Binbin Zhang): Refine the segments logic, here we just
             # suppose there is only silence at the start/end of the speech
@@ -192,3 +197,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+w

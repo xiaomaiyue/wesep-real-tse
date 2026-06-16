@@ -1,0 +1,115 @@
+# Speaker + Text TSE: BSRNN conditioned on BOTH the ECAPA speaker embedding
+# (audio enrollment) and a frozen-text-encoder embedding. Both cues go
+# through the same SpeakerFuseLayer interface, applied sequentially.
+dataloader_args:
+  batch_size: 15
+  drop_last: true
+  num_workers: 6
+  pin_memory: true
+  prefetch_factor: 6
+
+dataset_args:
+  resample_rate: &sr 16000
+  sample_num_per_epoch: 0
+  shuffle: true
+  shuffle_args:
+    shuffle_size: 2500
+  chunk_len: 48000
+  noise_prob: 0
+  noise_lmdb_file: './data/musan/lmdb'
+  cues:
+    audio:
+      use: true
+      required: true
+    text:
+      use: true
+      required: true
+  cue_processing:
+    audio:
+      reverb_enroll_prob: 0
+      noise_enroll_prob: 0
+
+enable_amp: false
+exp_dir: exp/BSRNN_SPK_TEXT
+gpus: '0,1'
+log_batch_interval: 100
+
+loss: SISDR
+loss_args: { }
+
+model:
+  tse_model: TSE_BSRNN_SPK
+model_args:
+  tse_model:
+    separator:
+      sr: *sr
+      win: 512
+      stride: 128
+      feature_dim: 128
+      num_repeat: 6
+      causal: False
+      nspk: 1
+    speaker:
+      features:
+        listen:
+          enabled: False
+        usef:
+          enabled: False
+        tfmap:
+          enabled: False
+        context:
+          enabled: False
+        spkemb:
+          enabled: True
+          speaker_model:
+          fusion: "multiply"
+        textemb:
+          enabled: True
+          text_dim: 384
+          proj_dim: 192
+          proj_hidden: 256
+          proj_layers: 2
+          fusion: "multiply"
+      speaker_model:
+        fbank:
+          num_mel_bins: 80
+          frame_shift: 10
+          frame_length: 25
+          dither: 1.0
+          sample_rate: *sr
+        speaker_encoder:
+          model: ECAPA_TDNN_GLOB_c512
+          pretrained: ./wespeaker_models/voxceleb_ECAPA512/avg_model.pt
+          spk_args:
+            embed_dim: 192
+            feat_dim: 80
+            pooling_func: "ASTP"
+
+model_init:
+  tse_model: null
+  discriminator: null
+  spk_model: null
+
+num_avg: 10
+num_epochs: 150
+
+optimizer:
+  tse_model: Adam
+optimizer_args:
+  tse_model:
+    lr: 0.001
+    weight_decay: 0.0001
+
+clip_grad: 5.0
+save_epoch_interval: 10
+
+scheduler:
+  tse_model: ExponentialDecrease
+scheduler_args:
+  tse_model:
+    final_lr: 2.5e-05
+    initial_lr: 0.001
+    warm_from_zero: false
+    warm_up_epoch: 0
+
+seed: 42

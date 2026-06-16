@@ -300,6 +300,48 @@ class SpeakerEmbFeature(BaseSpeakerFeature):
         return self.fusionLayer(mix_repr, emb)  # or concat, configurable
 
 
+class TextEmbFeature(BaseSpeakerFeature):
+    """Semantic text cue: precomputed (frozen-encoder) text embedding.
+
+    Mirrors SpeakerEmbFeature, but the embedding arrives precomputed from
+    the dataset (text_aux), so compute() is just a projection MLP mapping
+    text_dim -> proj_dim; fusion reuses the same SpeakerFuseLayer interface
+    (multiply | additive | concat | FiLM) as the speaker-embedding path.
+    """
+
+    def __init__(self, conf_text):
+        super().__init__()
+        text_dim = conf_text["text_dim"]  # e.g. 384 for MiniLM
+        proj_dim = conf_text.get("proj_dim", 192)  # match spk emb dim
+        hid_dim = conf_text.get("proj_hidden", 256)
+        n_layers = conf_text.get("proj_layers", 2)
+
+        layers = []
+        d = text_dim
+        for _ in range(max(n_layers - 1, 0)):
+            layers += [nn.Linear(d, hid_dim), nn.ReLU()]
+            d = hid_dim
+        layers.append(nn.Linear(d, proj_dim))
+        self.proj = nn.Sequential(*layers)
+
+        self.fusionLayer = SpeakerFuseLayer(
+            embed_dim=proj_dim,
+            feat_dim=conf_text['mix_dim'],
+            fuse_type=conf_text['fusion'],
+        )
+
+    def compute(self, text_emb, mix=None):
+        """
+        text_emb: (B, D_text) precomputed embedding
+        return:
+            emb: (B, proj_dim)
+        """
+        return self.proj(text_emb)
+
+    def post(self, mix_repr, emb):
+        return self.fusionLayer(mix_repr, emb)
+
+
 class SpeakerFrontend(nn.Module):
 
     def __init__(self, config):
@@ -349,6 +391,17 @@ class SpeakerFrontend(nn.Module):
                     "enabled": False,
                     "speaker_model": None,
                     "fusion": "multiply",  # add | concat | multiply
+                    "mix_dim": 128,
+                },
+
+                # ---- Text cue (precomputed embedding, no speaker encoder)
+                "textemb": {
+                    "enabled": False,
+                    "text_dim": 384,  # MiniLM: 384, BERT: 768
+                    "proj_dim": 192,  # match speaker embedding dim
+                    "proj_hidden": 256,
+                    "proj_layers": 2,
+                    "fusion": "multiply",  # add | concat | multiply | FiLM
                     "mix_dim": 128,
                 },
             },
@@ -409,6 +462,9 @@ class SpeakerFrontend(nn.Module):
                 fbank=self.fbank,
                 encoder=self.encoder,
             )
+
+        if feats['textemb']['enabled']:
+            self.textemb = TextEmbFeature(feats['textemb'])
 
     def compute_all(self, enroll, mix=None):
         out = {}
