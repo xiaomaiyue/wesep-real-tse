@@ -1,0 +1,91 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>text-TSE 实验小结：时间分辨文本线索 + Cross-Attention</title>
+<style>
+  @page { size: A4; margin: 18mm 16mm; }
+  * { box-sizing: border-box; }
+  body {
+    font-family: "PingFang SC", "Hiragino Sans GB", "Heiti SC", sans-serif;
+    color: #1a1a1a; line-height: 1.6; font-size: 11.2pt; margin: 0;
+  }
+  h1 { font-size: 18pt; margin: 0 0 2px; }
+  h2 { font-size: 13.5pt; border-left: 4px solid #2b6cb0; padding-left: 8px;
+       margin: 20px 0 8px; color: #15395b; }
+  .sub { color: #666; font-size: 9.5pt; margin-bottom: 4px; }
+  p { margin: 6px 0; }
+  code { background: #f1f3f5; padding: 1px 5px; border-radius: 3px;
+         font-family: "SF Mono", Menlo, monospace; font-size: 9.5pt; }
+  table { border-collapse: collapse; width: 100%; margin: 8px 0 4px;
+          font-size: 10pt; }
+  th, td { border: 1px solid #cbd5e0; padding: 4px 8px; text-align: center; }
+  th { background: #edf2f7; }
+  td.l, th.l { text-align: left; }
+  .good { color: #1a7f37; font-weight: 600; }
+  .bad  { color: #b91c1c; font-weight: 600; }
+  .key { background: #fffbe6; border: 1px solid #f0d98a; border-radius: 5px;
+         padding: 8px 12px; margin: 10px 0; }
+  ul { margin: 6px 0; padding-left: 22px; }
+  li { margin: 3px 0; }
+  .foot { color: #888; font-size: 9pt; margin-top: 6px; }
+</style>
+</head>
+<body>
+
+<h1>text-TSE 实验小结</h1>
+<div class="sub">时间分辨文本线索 + Cross-Attention（Exp1）&nbsp;·&nbsp;2026-06-16&nbsp;·&nbsp;Libri2Mix train-clean-100，BSRNN + 冻结 MiniLM-384，4×RTX4090D</div>
+
+<h2>一、背景与动机</h2>
+<p>此前三套方案（固定 13900 混音 baseline / 抗过拟合正则 / 在线动态混音）在测试集上均失败：训练集 swap gap ≈ 25 dB（机制成立），但<b>测试集（unseen 说话人）上 oracle ≈ interferer ≈ 0 dB、接受率仅 3%</b>——模型塌缩成 passthrough、无视文本。</p>
+<p>根因诊断：旧文本线索是<b>整句 mean-pool 成单个 384 维向量</b>，等价于每条语句的「唯一指纹」。模型只需记住「这个向量 ↔ 见过的这条声源」的查表，无需学可泛化的「内容→说话人」对齐 → 不迁移到 unseen。</p>
+
+<h2>二、本轮方法（改了什么）</h2>
+<ul>
+  <li><b>线索表示</b>：句向量 → 保留 MiniLM 每个 token 的 <code>last_hidden_state</code>（L×384 序列，恢复时间/序列维度）。</li>
+  <li><b>融合方式</b>：时间不变的 multiply → 在 BSRNN 子带特征上做 <b>cross-attention</b>（音频帧作 Query，文本 token 作 Key/Value），让模型逐帧对齐「哪个词对应哪段声学」。</li>
+  <li><b>工程</b>：变长 token 的 padding + key_padding_mask、cue 路由、合成张量 smoke 测试（形状/掩码/文本敏感性）全部通过。</li>
+</ul>
+
+<h2>三、训练过程</h2>
+<p><b>不稳定 → 已解决。</b> 直接用 lr 1e-3、无 warmup 时，cross-attention 在 ~ep5 起<span class="bad">震荡发散</span>（train loss 冲到 0.2、始终不下负）。改为 <b>warmup 5 epoch + lr 3e-4 + clip 1.0</b> 后训练平滑稳定。</p>
+<p class="sub">损失为 <code>auraloss SISDRLoss = −SI-SDR</code>：<b>越负越好</b>，≈0 为 passthrough，正值比 passthrough 更差。</p>
+<table>
+  <tr><th>epoch</th><th>1</th><th>5</th><th>6</th><th>8</th><th>11</th><th>16</th><th>20</th><th>25</th></tr>
+  <tr><td class="l">train</td><td>1.66</td><td>0.007</td><td class="good">−0.020</td><td>−0.104</td><td>−0.197</td><td>−0.565</td><td>−1.02</td><td class="good">−2.06</td></tr>
+  <tr><td class="l">val</td><td>0.017</td><td>0.061</td><td>0.009</td><td>0.037</td><td>0.102</td><td>0.496</td><td>0.410</td><td class="bad">0.640</td></tr>
+</table>
+<p><b>train 稳定下负</b>（ep6 起，ep25 达 −2.06）= 训练集上学会了用文本提取；但 <b>val 从 ~0.03 爆涨到 0.4–0.8</b>，train/val 鸿沟持续拉大 = 典型<span class="bad">过拟合</span>。</p>
+
+<h2>四、评估：test swap（关键判决）</h2>
+<p class="sub">swap test：同一测试混合跑两遍——给 oracle 文本（目标转写）vs interferer 文本（干扰者转写），均以目标为参考打分。用对文本应能提取、用错文本应失败；二者差距（gap）= 模型是否真在「用文本选人」。</p>
+<table>
+  <tr><th class="l">checkpoint</th><th>oracle SI-SDRi</th><th>oracle 接受率</th><th>interferer SI-SDRi</th><th>interferer 接受率</th><th>gap</th></tr>
+  <tr><td class="l">ckpt10</td><td>−0.01</td><td>12.0%</td><td>−0.29</td><td>7.1%</td><td>+0.28 dB</td></tr>
+  <tr><td class="l">ckpt15</td><td>−0.07</td><td>21.5%</td><td>−0.69</td><td>12.7%</td><td>+0.62 dB</td></tr>
+  <tr><td class="l">ckpt20</td><td>−0.24</td><td>24.5%</td><td>−0.93</td><td>19.0%</td><td>+0.69 dB</td></tr>
+  <tr style="background:#f7fafc"><td class="l">baseline（句向量）</td><td>−0.03</td><td class="bad">3.2%</td><td>−0.13</td><td>—</td><td>~0.1 dB</td></tr>
+</table>
+
+<h2>五、结论</h2>
+<div class="key">
+<b>一句话：cross-attention 的方向是对的、能训、且比 baseline 明显更「会用文本」，但端到端只用 SI-SDR 仍训不出泛化的干净提取，会过拟合。</b>
+</div>
+<ul>
+  <li><span class="good">✅ 能训</span>：warmup 解决了不稳定，train loss 稳定下负。</li>
+  <li><span class="good">✅ 更 text-aware</span>：测试接受率 <b>3% → 12–24%</b>；oracle 始终 &gt; interferer，且 <b>gap 随训练增大</b>（0.28 → 0.69 dB）——换错文本性能稳定变差，证明模型确实在用文本选人。</li>
+  <li><span class="bad">❌ 不泛化</span>：oracle 平均 SI-SDRi ≈ 0（unseen 说话人上即使给对文本也提不出），与 baseline 同样的墙；同时过拟合（train −2 / val +0.7）。</li>
+</ul>
+<p>解读：时间分辨 cross-attention 比单个句向量更能抓到文本信号，但「端到端仅 SI-SDR」的监督太弱/太间接，不足以让注意力学出可泛化的「内容→说话人」对齐——模型一边变得更 text-aware、一边过拟合。</p>
+
+<h2>六、下一步</h2>
+<p>同任务参考工作 <b>DAE-TSE</b>（同样 keyword/transcript-guided TSE + BSRNN + WeSep + cross-attention，达 16 dB SI-SDRi / 98% 接受率）的差异恰好指出缺口，且与本轮数据自身的指向一致：</p>
+<ul>
+  <li><b>音素 cue（G2P）</b>替代 MiniLM 句/词向量——音素与声学直接对齐、词表有限、train/test 复现，覆盖更好。</li>
+  <li><b>给线索路径加辅助监督</b>：ASR(CTC) + 说话人验证（其消融显示去掉 CTC：16.45 → 3.47 dB）——给 cross-attention 直接的「内容对齐 + 选人正确」梯度，这是端到端 SI-SDR 给不了的。</li>
+  <li><b>两阶段</b>（先训线索编码器、冻结、再训分离骨干）——同时解决监督不足与训练不稳。</li>
+</ul>
+<p class="foot">代码与脚本已提交至 fork 分支 <code>text-tse-wip</code>（commit 50d7f51）。评估脚本 <code>cluster/eval_swap_lr4.slurm</code>；训练 conf <code>confs/tse_bsrnn_text_xattn_lr4.yaml</code>。</p>
+
+</body>
+</html>
