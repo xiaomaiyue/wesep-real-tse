@@ -79,6 +79,10 @@ class TSE_BSRNN_SPK(nn.Module):
         if self.spk_configs["features"]["context"]["enabled"]:
             self.spk_configs["features"]["context"][
                 "band"] = self.sep_model.nband  #
+        if self.spk_configs["features"]["textemb"]["enabled"]:
+            # cross_attn mode runs one CrossFuse query per subband
+            self.spk_configs["features"]["textemb"][
+                "band"] = self.sep_model.nband
         self.spk_ft = SpeakerFrontend(self.spk_configs)
 
     def forward(self, mix, cues):
@@ -97,9 +101,14 @@ class TSE_BSRNN_SPK(nn.Module):
         wav_enroll = None
         text_emb = None
         for cue in cues:
-            if cue.dim() == 3:  # (B, 1, T_e) enrollment waveform
+            if cue.dim() == 3 and cue.shape[1] == 1:
+                # (B, 1, T_e) enrollment waveform
                 wav_enroll = cue.squeeze(1)
-            elif cue.dim() == 2:  # (B, D_text) text embedding
+            elif cue.dim() == 3:
+                # (B, D_text, L) text token sequence (D_text > 1)
+                text_emb = cue
+            elif cue.dim() == 2:
+                # (B, D_text) legacy single text embedding
                 text_emb = cue
             else:
                 raise ValueError(f"Unsupported cue shape: {tuple(cue.shape)}")
@@ -185,12 +194,10 @@ class TSE_BSRNN_SPK(nn.Module):
                 subband_feature, enroll_emb)  # (B, nband, feat, T)
         # C5. Feature: textemb (semantic text cue)
         if self.spk_configs['features']['textemb']['enabled']:
-            # C5.1 Project the precomputed text embedding
-            text_proj = self.spk_ft.textemb.compute(text_emb)  # (B, P)
-            # C5.2 Fuse the text embedding into the mix_repr
-            text_proj = text_proj.unsqueeze(1).unsqueeze(3)  # (B, 1, P, 1)
-            subband_feature = self.spk_ft.textemb.post(
-                subband_feature, text_proj)  # (B, nband, feat, T)
+            # vector mode: time-invariant projection+fuse; cross_attn mode:
+            # align text tokens to audio frames then fuse. Both handled in fuse.
+            subband_feature = self.spk_ft.textemb.fuse(
+                subband_feature, text_emb)  # (B, nband, feat, T)
         ###########################################################
         # S4. Separation
         sep_output = self.sep_model.separator(

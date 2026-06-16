@@ -145,10 +145,12 @@ class CrossFuse(nn.Module):
         self.multihead_attn = nn.MultiheadAttention(atten_dim, num_heads,
                                                     *args, **kwargs)
 
-    def forward(self, mix, emb):
+    def forward(self, mix, emb, key_padding_mask=None):
         """
-        mix: (B, F, T) or (B, band, F, T)
-        emb: (B, F_e, T_e)
+        mix: (B, F, T) or (B, band, F, T)   -> attention queries (time axis T)
+        emb: (B, F_e, T_e)                  -> keys/values (source axis T_e)
+        key_padding_mask: (B, T_e) bool, True = ignore (e.g. padded text
+            tokens). Optional; None keeps the original (no-mask) behavior.
         return:
             spk_embeddings: (B, F, T) or (B, band, F, T)
         """
@@ -160,14 +162,16 @@ class CrossFuse(nn.Module):
                 query = self.Linear_mix(query.transpose(1, 2))
                 key = self.Linear[i](emb.transpose(1, 2))
                 value = key
-                x, _ = self.multihead_attn(query, key, value)
+                x, _ = self.multihead_attn(
+                    query, key, value, key_padding_mask=key_padding_mask)
                 spk_embeddings.append(x.transpose(1, 2))
             spk_embeddings = torch.stack(spk_embeddings, dim=1)
         elif mix.dim() == 3:
             query = self.Linear_mix(mix.transpose(1, 2))
             key = self.Linear[0](emb.transpose(1, 2))
             value = key
-            x, _ = self.multihead_attn(query, key, value)
+            x, _ = self.multihead_attn(
+                query, key, value, key_padding_mask=key_padding_mask)
             spk_embeddings = x.transpose(1, 2)
         return spk_embeddings
 

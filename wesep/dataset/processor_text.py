@@ -97,7 +97,16 @@ def attach_fixed_text_cue(
                 logging.warning(msg)
                 continue
 
-            vec = np.asarray(embs[emb_key], dtype=np.float32).reshape(-1)
-            sample[f"text_{slot}"] = vec
+            arr = np.asarray(embs[emb_key], dtype=np.float32)
+            if arr.ndim == 2:
+                # token-level cue (L, D) -> (D, L): put the variable token axis
+                # last so the generic collate (which pads the last dim) pads
+                # along tokens, and the result (B, D, L) plugs straight into
+                # CrossFuse's emb=(B, F_e, T_e) interface.
+                arr = np.ascontiguousarray(arr.T)
+            else:
+                # legacy single sentence vector (D,)
+                arr = arr.reshape(-1)
+            sample[f"text_{slot}"] = arr
 
         yield sample

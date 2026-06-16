@@ -58,14 +58,17 @@ BASE_COLLECT_KEYS = {
         "as_tensor": True,
     },
 
-    # ===== Text cue (precomputed embedding, fixed-size vector) =====
+    # ===== Text cue (precomputed embedding) =====
+    # Stored as (D, L): token axis L is last. "max" pads short token sequences
+    # up to the batch-max L (zeros), which a downstream key_padding_mask then
+    # ignores. For a legacy single vector (D,) every sample shares dim D, so
+    # align is a no-op there.
     "text_aux": {
         "source": "dataset",
         "key_tpl": "text_spk{}",
         "axis": "spk",
         "required": False,
-        # all vectors share the same dim -> align is a no-op
-        "align": "min",
+        "align": "max",
         "as_tensor": True,
     },
 }

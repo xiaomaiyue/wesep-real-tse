@@ -303,43 +303,92 @@ class SpeakerEmbFeature(BaseSpeakerFeature):
 class TextEmbFeature(BaseSpeakerFeature):
     """Semantic text cue: precomputed (frozen-encoder) text embedding.
 
-    Mirrors SpeakerEmbFeature, but the embedding arrives precomputed from
-    the dataset (text_aux), so compute() is just a projection MLP mapping
-    text_dim -> proj_dim; fusion reuses the same SpeakerFuseLayer interface
-    (multiply | additive | concat | FiLM) as the speaker-embedding path.
+    Two modes (config ``mode``):
+
+    * ``vector`` (legacy): the cue is a single sentence vector (B, D_text).
+      compute() projects it to proj_dim and fusion is a time-invariant
+      SpeakerFuseLayer (multiply | additive | concat | FiLM) -- the same
+      global conditioning as the speaker-embedding path.
+
+    * ``cross_attn``: the cue is a *token sequence* (B, D_text, L). We mirror
+      ContextFeature: a CrossFuse aligns each audio frame (query) to the text
+      tokens (key/value), producing a time-resolved (B, band, atten, T) signal,
+      which a SpeakerFuseLayer then fuses back. This restores the token axis so
+      the separator can learn which word lands on which frame, instead of
+      memorizing a single sentence fingerprint.
     """
 
     def __init__(self, conf_text):
         super().__init__()
+        self.mode = conf_text.get("mode", "vector")
         text_dim = conf_text["text_dim"]  # e.g. 384 for MiniLM
-        proj_dim = conf_text.get("proj_dim", 192)  # match spk emb dim
-        hid_dim = conf_text.get("proj_hidden", 256)
-        n_layers = conf_text.get("proj_layers", 2)
 
-        layers = []
-        d = text_dim
-        for _ in range(max(n_layers - 1, 0)):
-            layers += [nn.Linear(d, hid_dim), nn.ReLU()]
-            d = hid_dim
-        layers.append(nn.Linear(d, proj_dim))
-        self.proj = nn.Sequential(*layers)
+        if self.mode == "cross_attn":
+            self.attenFuse = CrossFuse(
+                embed_dim=text_dim,
+                atten_dim=conf_text.get("atten_dim", 128),
+                mix_dim=conf_text["mix_dim"],
+                num_heads=conf_text.get("num_heads", 4),
+                nband=conf_text["band"],
+                batch_first=True,
+            )
+            self.fusionLayer = SpeakerFuseLayer(
+                embed_dim=conf_text.get("atten_dim", 128),
+                feat_dim=conf_text["mix_dim"],
+                # multiply/additive/concat operate per (band, time); FiLM does
+                # not (it expects a single vector), so keep it out of this path.
+                fuse_type=conf_text.get("fusion", "multiply"),
+            )
+        elif self.mode == "vector":
+            proj_dim = conf_text.get("proj_dim", 192)  # match spk emb dim
+            hid_dim = conf_text.get("proj_hidden", 256)
+            n_layers = conf_text.get("proj_layers", 2)
 
-        self.fusionLayer = SpeakerFuseLayer(
-            embed_dim=proj_dim,
-            feat_dim=conf_text['mix_dim'],
-            fuse_type=conf_text['fusion'],
-        )
+            layers = []
+            d = text_dim
+            for _ in range(max(n_layers - 1, 0)):
+                layers += [nn.Linear(d, hid_dim), nn.ReLU()]
+                d = hid_dim
+            layers.append(nn.Linear(d, proj_dim))
+            self.proj = nn.Sequential(*layers)
 
+            self.fusionLayer = SpeakerFuseLayer(
+                embed_dim=proj_dim,
+                feat_dim=conf_text['mix_dim'],
+                fuse_type=conf_text['fusion'],
+            )
+        else:
+            raise ValueError(f"Unknown textemb mode: {self.mode}")
+
+    def fuse(self, mix_repr, text_emb):
+        """Single entry point: condition mix_repr on the text cue.
+
+        mix_repr: (B, band, feat, T)
+        text_emb: (B, D_text, L) token sequence (cross_attn) or
+                  (B, D_text) single vector (vector / cross_attn with L=1)
+        """
+        if self.mode == "cross_attn":
+            if text_emb.dim() == 2:            # (B, D) -> (B, D, 1) single tok
+                text_emb = text_emb.unsqueeze(-1)
+            # padded token columns are exact zeros (real L2-normed tokens have
+            # norm 1) -> derive the key_padding_mask from all-zero columns.
+            kpm = text_emb.abs().sum(dim=1) == 0          # (B, L) True = pad
+            # a fully-padded row would make attention NaN; unmask it (degenerate
+            # but safe -- should not happen since every utt has >=1 token).
+            kpm = kpm & ~kpm.all(dim=1, keepdim=True)
+            attended = self.attenFuse(mix_repr, text_emb, key_padding_mask=kpm)
+            return self.fusionLayer(mix_repr, attended)
+        else:
+            emb = self.proj(text_emb)                     # (B, proj_dim)
+            emb = emb.unsqueeze(1).unsqueeze(3)           # (B, 1, proj_dim, 1)
+            return self.fusionLayer(mix_repr, emb)
+
+    # kept for API symmetry with the other features / compute_all()
     def compute(self, text_emb, mix=None):
-        """
-        text_emb: (B, D_text) precomputed embedding
-        return:
-            emb: (B, proj_dim)
-        """
-        return self.proj(text_emb)
+        return text_emb
 
     def post(self, mix_repr, emb):
-        return self.fusionLayer(mix_repr, emb)
+        return self.fuse(mix_repr, emb)
 
 
 class SpeakerFrontend(nn.Module):
@@ -397,12 +446,18 @@ class SpeakerFrontend(nn.Module):
                 # ---- Text cue (precomputed embedding, no speaker encoder)
                 "textemb": {
                     "enabled": False,
+                    "mode": "vector",  # vector (single emb) | cross_attn (tokens)
                     "text_dim": 384,  # MiniLM: 384, BERT: 768
+                    # -- vector mode --
                     "proj_dim": 192,  # match speaker embedding dim
                     "proj_hidden": 256,
                     "proj_layers": 2,
                     "fusion": "multiply",  # add | concat | multiply | FiLM
                     "mix_dim": 128,
+                    # -- cross_attn mode (token sequence) --
+                    "atten_dim": 128,
+                    "num_heads": 4,
+                    "band": 1,  # set to sep_model.nband at model init
                 },
             },
 
