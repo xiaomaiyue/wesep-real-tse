@@ -118,6 +118,12 @@ class Executor:
                     if not isinstance(outputs, (list, tuple)):
                         outputs = [outputs]
 
+                    # align lengths: BSRNN iSTFT trims output to a hop multiple,
+                    # so est can be a few samples shorter than the target.
+                    _L = min(target.shape[-1], min(o.shape[-1] for o in outputs))
+                    target = target[..., :_L]
+                    outputs = [o[..., :_L] for o in outputs]
+
                     # ---- loss ----
                     loss = 0.0
                     for ii in range(len(criterion)):
@@ -192,6 +198,12 @@ class Executor:
 
                     if not isinstance(outputs, (list, tuple)):
                         outputs = [outputs]
+
+                    # align lengths: BSRNN iSTFT trims output to a hop multiple,
+                    # so est can be a few samples shorter than the target.
+                    _L = min(target.shape[-1], min(o.shape[-1] for o in outputs))
+                    target = target[..., :_L]
+                    outputs = [o[..., :_L] for o in outputs]
 
                     # 默认第一个 loss 作为验证指标
                     loss = criterion[0](outputs[0], target).mean()

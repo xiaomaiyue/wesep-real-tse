@@ -39,3 +39,7 @@ raw_wav
 tensorboard
 # **/*build*
 wespeaker_models
+
+# Large model checkpoints / sample data (kept out of git; backed up elsewhere)
+real-tse-ckpt
+mini_librimix_tse

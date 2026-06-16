@@ -163,7 +163,9 @@ def Dataset(
     dataset = build_audio_base_layer(dataset, configs, state, online_mix)
 
     # 3) Online mix & augmentation
-    if state == "train":
+    #    online_mix also needs the mix layer for val: val data is single-speaker
+    #    sources that must be dynamically mixed to evaluate separation.
+    if state == "train" or online_mix:
         dataset = build_mix_layer(dataset, configs, state, online_mix)
 
     # 4) Cue layer

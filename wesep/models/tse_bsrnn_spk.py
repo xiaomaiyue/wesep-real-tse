@@ -56,6 +56,10 @@ class TSE_BSRNN_SPK(nn.Module):
                     "enabled": False,
                     "mix_dim": sep_configs["feature_dim"]
                 },
+                "textemb": {
+                    "enabled": False,
+                    "mix_dim": sep_configs["feature_dim"]
+                },
             },
             "speaker_model": {
                 "fbank": {
@@ -77,25 +81,47 @@ class TSE_BSRNN_SPK(nn.Module):
                 "band"] = self.sep_model.nband  #
         self.spk_ft = SpeakerFrontend(self.spk_configs)
 
-    def forward(self, mix, enroll):
+    def forward(self, mix, cues):
         """
         Args:
             mix:  Tensor [B, 1, T]
-            enroll: list[Tensor]
-                each Tensor: [B, 1, T]
+            cues: list[Tensor] (or a single Tensor)
+                waveform cue (audio enrollment): [B, 1, T_e] (3D)
+                text cue (precomputed embedding): [B, D_text] (2D)
+                Routing is by ndim, so cue order does not matter.
         """
 
-        if isinstance(enroll, (list, tuple)):
-            enroll = enroll[0]
+        if not isinstance(cues, (list, tuple)):
+            cues = [cues]
+
+        wav_enroll = None
+        text_emb = None
+        for cue in cues:
+            if cue.dim() == 3:  # (B, 1, T_e) enrollment waveform
+                wav_enroll = cue.squeeze(1)
+            elif cue.dim() == 2:  # (B, D_text) text embedding
+                text_emb = cue
+            else:
+                raise ValueError(f"Unsupported cue shape: {tuple(cue.shape)}")
+
+        feats = self.spk_configs['features']
+        needs_wav = (feats['listen']['enabled'] or feats['usef']['enabled']
+                     or feats['tfmap']['enabled']
+                     or feats['context']['enabled']
+                     or feats['spkemb']['enabled'])
+        if needs_wav and wav_enroll is None:
+            raise RuntimeError(
+                "Model has waveform-cue features enabled but no audio "
+                "enrollment cue was provided")
+        if feats['textemb']['enabled'] and text_emb is None:
+            raise RuntimeError(
+                "Model has textemb enabled but no text cue was provided")
+
         mix = mix.squeeze(1)
-        enroll = enroll.squeeze(1)
 
         # input shape: (B, T)
         mix_dims = mix.dim()
         assert mix_dims == 2, "Only support 2D Input"
-
-        ##### Cue of the target speaker
-        wav_enroll = enroll
         ###### Extraction with speaker cue
         batch_size, nsamples = mix.shape
         wav_mix = mix
@@ -157,6 +183,14 @@ class TSE_BSRNN_SPK(nn.Module):
             enroll_emb = enroll_emb.unsqueeze(1).unsqueeze(3)  # (B, 1, F_e, 1)
             subband_feature = self.spk_ft.spkemb.post(
                 subband_feature, enroll_emb)  # (B, nband, feat, T)
+        # C5. Feature: textemb (semantic text cue)
+        if self.spk_configs['features']['textemb']['enabled']:
+            # C5.1 Project the precomputed text embedding
+            text_proj = self.spk_ft.textemb.compute(text_emb)  # (B, P)
+            # C5.2 Fuse the text embedding into the mix_repr
+            text_proj = text_proj.unsqueeze(1).unsqueeze(3)  # (B, 1, P, 1)
+            subband_feature = self.spk_ft.textemb.post(
+                subband_feature, text_proj)  # (B, nband, feat, T)
         ###########################################################
         # S4. Separation
         sep_output = self.sep_model.separator(

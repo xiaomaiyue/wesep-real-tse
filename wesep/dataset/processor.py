@@ -20,6 +20,19 @@ from wesep.dataset.timeline import sample_num_speakers, timeline_generator, pars
 AUDIO_FORMAT_SETS = {"flac", "mp3", "m4a", "ogg", "opus", "wav", "wma"}
 
 
+def _sf_load(path_or_file):
+    """soundfile-backed replacement for ``torchaudio.load``.
+
+    torchaudio>=2.9 routes ``load`` through TorchCodec (needs the ``torchcodec``
+    package + FFmpeg). When that backend is missing every read raises and, with
+    repeat_dataset, the loader spins forever (GBs of "Failed to read wav").
+    soundfile (libsndfile) reads these PCM WAVs directly. Returns
+    (FloatTensor[C, T], sr), matching torchaudio.load (float32 in [-1, 1]).
+    """
+    data, sr = sf.read(path_or_file, dtype="float32", always_2d=True)  # (T, C)
+    return torch.from_numpy(data.T.copy()), sr
+
+
 def url_opener(data):
     """Give url or local file, return file descriptor
     Inplace operation.
@@ -97,7 +110,7 @@ def tar_file_and_group(data):
                         num_speakers += 1
 
                     elif postfix in AUDIO_FORMAT_SETS:
-                        waveform, sr = torchaudio.load(f)
+                        waveform, sr = _sf_load(f)
 
                         if prefix.endswith("_spk1"):
                             example.setdefault("wav_spk1", []).append(waveform)
@@ -161,7 +174,7 @@ def tar_file_and_group_single_spk(data):
                         example[postfix] = (
                             file_obj.read().decode("utf8").strip())
                     elif postfix in AUDIO_FORMAT_SETS:
-                        waveform, sample_rate = torchaudio.load(file_obj)
+                        waveform, sample_rate = _sf_load(file_obj)
                         example["wav"] = waveform
                         example["sample_rate"] = sample_rate
                     else:
@@ -235,7 +248,7 @@ def parse_raw(data):
 
         for ch_idx, mix_path in enumerate(mix_paths):
             try:
-                wav_ch, sr = torchaudio.load(mix_path)  # (1, T) or (T,)
+                wav_ch, sr = _sf_load(mix_path)  # (1, T) or (T,)
             except Exception:
                 logging.warning(f"Failed to read mix wav: {mix_path}")
                 wav_list = []
@@ -301,7 +314,7 @@ def parse_raw(data):
             src_path = src_paths[0]
 
             try:
-                wav_spk, sr = torchaudio.load(src_path)
+                wav_spk, sr = _sf_load(src_path)
             except Exception:
                 logging.warning(f"Failed to read src wav: {src_path}")
                 continue
@@ -374,7 +387,7 @@ def parse_raw_single_spk(data):
 
         # -------- load audio --------
         try:
-            wav_ch, sr = torchaudio.load(wav_path)  # (C, T) or (T,)
+            wav_ch, sr = _sf_load(wav_path)  # (C, T) or (T,)
         except Exception:
             logging.warning(f"Failed to read wav: {wav_path}")
             continue
@@ -437,6 +450,7 @@ def sample_speaker_group(data,
                     "key": x["key"],
                     "wav_spk1": x["wav"],
                     "spk1": x["spk"],
+                    "utt_spk1": x["key"],  # utterance id of this slot (utt-level text cue)
                     "sample_rate": x["sample_rate"],
                     "num_speaker": num_speaker,
                     "overlap_ratio_2spk": parse_overlap_ratio(overlap_ratio),
@@ -462,6 +476,8 @@ def sample_speaker_group(data,
                             str(interference_idx)] = interference["wav"]
                     example["spk" +
                             str(interference_idx)] = interference["spk"]
+                    example["utt_spk" +
+                            str(interference_idx)] = interference["key"]
                 example["key"] = key
                 yield example
 
@@ -490,6 +506,7 @@ def sample_speaker_group(data,
             "key": x["key"],
             "wav_spk1": x["wav"],
             "spk1": x["spk"],
+            "utt_spk1": x["key"],  # utterance id of this slot (for utt-level text cue)
             "sample_rate": x["sample_rate"],
             "num_speaker": num_speaker,
             "overlap_ratio_2spk": parse_overlap_ratio(overlap_ratio),
@@ -511,6 +528,7 @@ def sample_speaker_group(data,
             ])
             example["wav_spk" + str(interference_idx)] = interference["wav"]
             example["spk" + str(interference_idx)] = interference["spk"]
+            example["utt_spk" + str(interference_idx)] = interference["key"]
         example["key"] = key
         yield example
 
