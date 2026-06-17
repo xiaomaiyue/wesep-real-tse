@@ -272,7 +272,8 @@ class SpeakerEmbFeature(BaseSpeakerFeature):
             self.fbank = Fbank_kaldi(**conf_emb["speaker_model"]['fbank'])
             self.encoder = SpeakerEncoder(
                 conf_emb["speaker_model"]['speaker_encoder'])
-            embed_dim = conf_emb['speaker_encoder']['spk_args']['embed_dim']
+            embed_dim = conf_emb["speaker_model"]['speaker_encoder'][
+                'spk_args']['embed_dim']
         else:
             self.fbank = fbank
             self.encoder = encoder

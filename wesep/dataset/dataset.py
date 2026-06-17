@@ -194,7 +194,8 @@ def build_audio_base_layer(dataset, configs, state, online_mix):
     # 2) Basic audio preprocessing
     if state == "train":
         if configs.get("filter_len", False):
-            filter_conf = configs.get("filter_args", {})
+            filter_conf = configs.get("filter_len_args",
+                                      configs.get("filter_args", {}))
             dataset = Processor(dataset, processor.filter_len, **filter_conf)
 
         if not online_mix:

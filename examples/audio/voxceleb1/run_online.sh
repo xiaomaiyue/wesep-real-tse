@@ -27,6 +27,7 @@ save_results=False
 
 . tools/parse_options.sh || exit 1
 
+num_gpus=$(echo $gpus | awk -F ',' '{print NF}')
 
 if [ ${stage} -le 1 ] && [ ${stop_stage} -ge 1 ]; then
   echo "Prepare datasets ..."
@@ -72,7 +73,6 @@ if [ ${stage} -le 3 ] && [ ${stop_stage} -ge 3 ]; then
   #  rm -r $exp_dir
   echo "Start training ..."
   export OMP_NUM_THREADS=8
-  num_gpus=$(echo $gpus | awk -F ',' '{print NF}')
   if [ -z "${checkpoint}" ] && [ -f "${exp_dir}/models/latest_checkpoint.pt" ]; then
     checkpoint="${exp_dir}/models/latest_checkpoint.pt"
   fi
@@ -93,16 +93,15 @@ fi
 
 if [ ${stage} -le 4 ] && [ ${stop_stage} -ge 4 ]; then
   echo "Do model average ..."
-  avg_model=$exp_dir/models/avg_best_model.pt
+  avg_model=$exp_dir/models/avg_final_model.pt
   python wesep/bin/average_model.py \
     --dst_model $avg_model \
     --src_path $exp_dir/models \
     --num ${num_avg} \
-    --mode best \
-    --epochs "138,141"
+    --mode final
 fi
-if [ -z "${checkpoint}" ] && [ -f "${exp_dir}/models/avg_best_model.pt" ]; then
-  checkpoint="${exp_dir}/models/avg_best_model.pt"
+if [ -f "${exp_dir}/models/avg_final_model.pt" ]; then
+  checkpoint="${exp_dir}/models/avg_final_model.pt"
 fi
 
 if [ ${stage} -le 5 ] && [ ${stop_stage} -ge 5 ]; then

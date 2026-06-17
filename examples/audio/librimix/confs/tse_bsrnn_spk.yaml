@@ -63,11 +63,11 @@ model_args:
           embed_dim: 512     # Need check the speaker encoder in wespeaker
           atten_dim: 128         # dim in cross-attention
           num_heads: 2
-          fusion": "multiply"    # add | concat | multiply
+          fusion: "multiply"    # additive | concat | multiply
         spkemb:
           enabled: True
           speaker_model:
-          fusion: "multiply" # add | concat | multiply
+          fusion: "multiply" # additive | concat | multiply
       speaker_model:
         fbank:
           num_mel_bins: 80

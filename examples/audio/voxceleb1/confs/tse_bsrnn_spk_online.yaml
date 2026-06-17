@@ -34,7 +34,7 @@ dataset_args:
   #   silence:
   #     allow: False  # Add silence seg to the head/tail
   #     head_tail_ratio: [0.0, 0.1]
-  mix_snr:
+  snr_conf:
     range: [-5, 10] # signal-to-interference ratio in dB
     gain: [-12, 0]
   noise_prob: 0
@@ -93,11 +93,11 @@ model_args:
           embed_dim: 512     # Need check the speaker encoder in wespeaker
           atten_dim: 128         # dim in cross-attention
           num_heads: 2
-          fusion": "multiply"    # add | concat | multiply
+          fusion: "multiply"    # additive | concat | multiply
         spkemb:
           enabled: False
           speaker_model:
-          fusion: "multiply" # add | concat | multiply
+          fusion: "multiply" # additive | concat | multiply
       speaker_model:
         fbank:
           num_mel_bins: 80

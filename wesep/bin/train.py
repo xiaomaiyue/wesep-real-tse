@@ -16,6 +16,7 @@
 import logging
 import os
 import re
+import ast
 from pprint import pformat
 
 import fire
@@ -48,6 +49,19 @@ MAX_NUM_log_files = 100  # The maximum number of log-files to be kept
 logging.getLogger("matplotlib.font_manager").setLevel(logging.ERROR)
 
 
+def parse_gpus(gpus):
+    if isinstance(gpus, int):
+        return [gpus]
+    if isinstance(gpus, (list, tuple)):
+        return [int(gpu) for gpu in gpus]
+    if isinstance(gpus, str):
+        gpus = gpus.strip()
+        if gpus.startswith("["):
+            return [int(gpu) for gpu in ast.literal_eval(gpus)]
+        return [int(gpu.strip()) for gpu in gpus.split(",") if gpu.strip()]
+    raise TypeError(f"Unsupported gpus config type: {type(gpus)}")
+
+
 def train(config="conf/config.yaml", **kwargs):
     """Trains a model on the given features and spk labels.
 
@@ -65,7 +79,8 @@ def train(config="conf/config.yaml", **kwargs):
     # dist configs
     rank = int(os.environ["RANK"])
     world_size = int(os.environ["WORLD_SIZE"])
-    gpu = int(configs["gpus"][rank])
+    configs["gpus"] = parse_gpus(configs["gpus"])
+    gpu = configs["gpus"][rank]
     torch.cuda.set_device(gpu)
     dist.init_process_group(backend="nccl")
 
@@ -343,9 +358,12 @@ def train(config="conf/config.yaml", **kwargs):
                     )
 
     if rank == 0:
+        final_checkpoint = os.path.join(model_dir, "final_checkpoint.pt")
+        if os.path.lexists(final_checkpoint):
+            os.remove(final_checkpoint)
         os.symlink(
             "checkpoint_{}.pt".format(configs["num_epochs"]),
-            os.path.join(model_dir, "final_checkpoint.pt"),
+            final_checkpoint,
         )
         logger.info(tp.bottom(len(header), width=10, style="grid"))
 

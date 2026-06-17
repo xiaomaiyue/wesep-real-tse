@@ -1,5 +1,6 @@
 from __future__ import print_function
 
+import ast
 import os
 import time
 
@@ -30,6 +31,19 @@ os.environ["CUDA_LAUNCH_BLOCKING"] = "1"
 os.environ["TORCH_USE_CUDA_DSA"] = "1"
 
 
+def parse_gpu(gpus):
+    if isinstance(gpus, int):
+        return gpus
+    if isinstance(gpus, (list, tuple)):
+        return int(gpus[0])
+    if isinstance(gpus, str):
+        gpus = gpus.strip()
+        if gpus.startswith("["):
+            return int(ast.literal_eval(gpus)[0])
+        return int(gpus.split(",")[0])
+    raise TypeError(f"Unsupported gpus config type: {type(gpus)}")
+
+
 def infer(config="confs/conf.yaml", **kwargs):
     start = time.time()
     total_SISNR = 0
@@ -43,7 +57,7 @@ def infer(config="confs/conf.yaml", **kwargs):
 
     rank = 0
     set_seed(configs["seed"] + rank)
-    gpu = configs["gpus"]
+    gpu = parse_gpu(configs["gpus"])
     device = (torch.device("cuda:{}".format(gpu))
               if gpu >= 0 else torch.device("cpu"))
 

@@ -47,52 +47,93 @@ def get_args():
     parser.add_argument(
         "--mode",
         default="final",
+        choices=["final", "best"],
         type=str,
-        help="use last epochs for average or best epochs",
+        help="final: average the last --num checkpoints; best: average --epochs",
     )
     parser.add_argument(
         "--epochs",
-        default="1,2,3,4,5",
+        default="",
         type=str,
-        help="use last epochs for average or best epochs",
+        help="comma-separated checkpoint epochs used by --mode best",
     )
     args = parser.parse_args()
     print(args)
     return args
 
 
+def checkpoint_epoch(path):
+    match = re.search(r"checkpoint_(\d+)\.pt$", os.path.basename(path))
+    if match is None:
+        return None
+    return int(match.group(1))
+
+
+def find_checkpoints(src_path, min_epoch, max_epoch):
+    paths = []
+    for path in glob.glob(os.path.join(src_path, "checkpoint_*.pt")):
+        epoch = checkpoint_epoch(path)
+        if epoch is None:
+            continue
+        if min_epoch <= epoch <= max_epoch:
+            paths.append((epoch, path))
+    return [path for _, path in sorted(paths)]
+
+
+def select_checkpoints(args):
+    if args.mode == "final":
+        path_list = find_checkpoints(args.src_path, args.min_epoch,
+                                     args.max_epoch)
+        if len(path_list) < args.num:
+            raise RuntimeError(
+                f"Need {args.num} checkpoints, but found {len(path_list)} "
+                f"in {args.src_path} within epoch range "
+                f"[{args.min_epoch}, {args.max_epoch}].")
+        return path_list[-args.num:]
+
+    if not args.epochs.strip():
+        raise ValueError("--epochs must be set when --mode best is used.")
+
+    epoch_indexes = [x.strip() for x in args.epochs.split(",") if x.strip()]
+    if len(epoch_indexes) != args.num:
+        raise ValueError(
+            f"--num is {args.num}, but --epochs contains "
+            f"{len(epoch_indexes)} epochs: {args.epochs}")
+
+    path_list = [
+        os.path.join(args.src_path, "checkpoint_" + x + ".pt")
+        for x in epoch_indexes
+    ]
+    missing = [p for p in path_list if not os.path.exists(p)]
+    if missing:
+        raise FileNotFoundError("Missing checkpoints: " + ", ".join(missing))
+    return path_list
+
+
 def main():
     args = get_args()
-    if args.mode == "final":
-        path_list = glob.glob("{}/*[!avg][!final][!latest].pt".format(
-            args.src_path))
-        path_list = sorted(
-            path_list,
-            key=lambda p: int(re.findall(r"(?<=checkpoint_)\d*(?=.pt)", p)[0]),
-        )
-        path_list = path_list[-args.num:]
-    else:
-        epoch_indexes = list(args.epochs.split(","))
-        path_list = [
-            os.path.join(args.src_path, "checkpoint_" + x + ".pt")
-            for x in epoch_indexes
-        ]
+    path_list = select_checkpoints(args)
     print(path_list)
     avg = None
     num = args.num
-    assert num == len(path_list)
     for path in path_list:
         print("Processing {}".format(path))
         states = torch.load(path, map_location=torch.device("cpu"))
         states = states["models"][0] if "models" in states else states
         if avg is None:
-            avg = states
+            avg = {
+                k: v.clone() if torch.is_tensor(v) else v
+                for k, v in states.items()
+            }
         else:
             for k in avg.keys():
-                avg[k] += states[k]
+                if torch.is_tensor(avg[k]) and torch.is_floating_point(avg[k]):
+                    avg[k] += states[k]
+                else:
+                    avg[k] = states[k]
     # average
     for k in avg.keys():
-        if avg[k] is not None:
+        if torch.is_tensor(avg[k]) and torch.is_floating_point(avg[k]):
             # pytorch 1.6 use true_divide instead of /=
             avg[k] = torch.true_divide(avg[k], num)
     avg = {"models": [avg]}

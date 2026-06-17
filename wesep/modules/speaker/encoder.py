@@ -1,8 +1,59 @@
+import importlib
+import importlib.machinery
+import sys
+import types
+from pathlib import Path
+
 import torch
 import torch.nn as nn
 import torchaudio.compliance.kaldi as kaldi
 
-from wespeaker.models.speaker_model import get_speaker_model
+_GET_SPEAKER_MODEL = None
+
+
+def _find_wespeaker_dir():
+    for root in sys.path:
+        if not root:
+            root = "."
+        pkg_dir = Path(root) / "wespeaker"
+        if (pkg_dir / "models" / "speaker_model.py").exists():
+            return pkg_dir
+    return None
+
+
+def _install_lightweight_wespeaker(pkg_dir):
+    for name in list(sys.modules):
+        if name == "wespeaker" or name.startswith("wespeaker."):
+            sys.modules.pop(name, None)
+
+    pkg = types.ModuleType("wespeaker")
+    pkg.__file__ = str(pkg_dir / "__init__.py")
+    pkg.__path__ = [str(pkg_dir)]
+    pkg.__package__ = "wespeaker"
+    pkg.__spec__ = importlib.machinery.ModuleSpec(
+        "wespeaker", loader=None, is_package=True)
+    sys.modules["wespeaker"] = pkg
+
+
+def get_wespeaker_model_factory():
+    global _GET_SPEAKER_MODEL
+    if _GET_SPEAKER_MODEL is not None:
+        return _GET_SPEAKER_MODEL
+
+    try:
+        module = importlib.import_module("wespeaker.models.speaker_model")
+    except Exception as first_error:
+        pkg_dir = _find_wespeaker_dir()
+        if pkg_dir is None:
+            raise first_error
+        _install_lightweight_wespeaker(pkg_dir)
+        try:
+            module = importlib.import_module("wespeaker.models.speaker_model")
+        except Exception:
+            raise first_error
+
+    _GET_SPEAKER_MODEL = module.get_speaker_model
+    return _GET_SPEAKER_MODEL
 
 
 class Fbank_kaldi(nn.Module):
@@ -99,6 +150,7 @@ class SpeakerEncoder(nn.Module):
             freeze = conf.get("freeze", False)
 
         # 1. build model
+        get_speaker_model = get_wespeaker_model_factory()
         self.spk_model = get_speaker_model(model_name)(**spk_args)
 
         # 2. load pretrained if provided
