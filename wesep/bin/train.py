@@ -194,6 +194,29 @@ def train(config="conf/config.yaml", **kwargs):
         for line in pformat(model).split("\n"):
             logger.info(line)
 
+    # Optionally freeze warm-started modules so only the text-cue path
+    # (spk_ft.textemb.* projection + cross-attn + FiLM) trains first.
+    # Config: `freeze: {sep_model: true}` freezes every param whose name
+    # starts with "sep_model". Must run before the DDP wrap so DDP excludes
+    # the frozen params from gradient sync.
+    freeze_cfg = configs.get("freeze", {}) or {}
+    if isinstance(freeze_cfg, dict):
+        freeze_prefixes = [k for k, on in freeze_cfg.items() if on]
+    else:
+        freeze_prefixes = list(freeze_cfg)
+    if freeze_prefixes:
+        n_frozen = 0
+        for name, p in model.named_parameters():
+            if any(name.startswith(pre) for pre in freeze_prefixes):
+                p.requires_grad = False
+                n_frozen += 1
+        if rank == 0:
+            n_train = sum(1 for _, p in model.named_parameters()
+                          if p.requires_grad)
+            logger.info("[freeze] prefixes={} | frozen_tensors={} | "
+                        "trainable_tensors={}".format(freeze_prefixes,
+                                                      n_frozen, n_train))
+
     # ddp_model
     model.cuda()
     ddp_model = torch.nn.parallel.DistributedDataParallel(
@@ -206,8 +229,9 @@ def train(config="conf/config.yaml", **kwargs):
 
     configs["optimizer_args"]["tse_model"]["lr"] = configs["scheduler_args"][
         "tse_model"]["initial_lr"]
+    trainable_params = [p for p in ddp_model.parameters() if p.requires_grad]
     optimizer = getattr(torch.optim, configs["optimizer"]["tse_model"])(
-        ddp_model.parameters(), **configs["optimizer_args"]["tse_model"])
+        trainable_params, **configs["optimizer_args"]["tse_model"])
     if rank == 0:
         logger.info("<== TSE Model Optimizer ==>")
         logger.info("optimizer is: " + configs["optimizer"]["tse_model"])

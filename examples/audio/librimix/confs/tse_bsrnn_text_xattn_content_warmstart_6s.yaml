@@ -1,0 +1,107 @@
+# R7 (route A): warm-started BSRNN, UNFROZEN (joint) + time-wise FiLM +
+# frozen-wav2vec2 content loss. The content loss kills the passthrough escape
+# (mixture's ASR features differ a lot from a single speaker) and grounds the
+# output's content, making the text cue load-bearing.
+dataloader_args:
+  batch_size: 1
+  drop_last: true
+  num_workers: 4
+  pin_memory: true
+  prefetch_factor: 2
+
+dataset_args:
+  resample_rate: &sr 16000
+  sample_num_per_epoch: 1024
+  shuffle: true
+  shuffle_args:
+    shuffle_size: 2500
+  chunk_len: 96000
+  noise_prob: 0
+  noise_lmdb_file: './data/musan/lmdb'
+  cues:
+    audio:
+      use: false
+      required: false
+    text:
+      use: true
+      required: true
+  cue_processing: { }
+
+enable_amp: true
+exp_dir: exp/BSRNN_TEXT_XATTN_CONTENT_WARMSTART_6S_R7
+gpus: '0,1,2'
+log_batch_interval: 20
+
+loss: SISDR
+loss_args:
+  swap_loss_weight: 0.0
+  contrast_loss_weight: 0.0
+  dual_target_weight: 0.0
+  content_loss_weight: 1.0    # frozen-wav2vec2 content/grounding loss
+
+model:
+  tse_model: TSE_BSRNN_SPK
+model_args:
+  tse_model:
+    separator:
+      sr: *sr
+      win: 512
+      stride: 128
+      feature_dim: 128
+      num_repeat: 6
+      causal: False
+      nspk: 1
+    speaker:
+      features:
+        listen:
+          enabled: False
+        usef:
+          enabled: False
+        tfmap:
+          enabled: False
+        context:
+          enabled: False
+        spkemb:
+          enabled: False
+        textemb:
+          enabled: True
+          mode: cross_attn
+          text_dim: 384
+          atten_dim: 128
+          num_heads: 4
+          fusion: "timewise_film"
+          film_scale: 1.0
+          film_init_std: 0.0001
+          film_bound: true
+          mix_dim: 128
+
+# warm-start whole backbone; NO freeze -> backbone learns to obey the cue,
+# content loss prevents the passthrough collapse that killed R5.
+model_init:
+  tse_model: pretrained/spk_emb_100/avg_model.pt
+  discriminator: null
+  spk_model: null
+
+num_avg: 5
+num_epochs: 30
+
+optimizer:
+  tse_model: Adam
+optimizer_args:
+  tse_model:
+    lr: 0.0001
+    weight_decay: 0.00001
+
+clip_grad: 1.0
+save_epoch_interval: 3
+
+scheduler:
+  tse_model: ExponentialDecrease
+scheduler_args:
+  tse_model:
+    final_lr: 1.0e-05
+    initial_lr: 0.0001
+    warm_from_zero: true
+    warm_up_epoch: 1
+
+seed: 42

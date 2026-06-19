@@ -1,0 +1,398 @@
+diff -ruN orig/examples/audio/librimix/cluster/train_text_xattn_film_swap_6s.slurm new/examples/audio/librimix/cluster/train_text_xattn_film_swap_6s.slurm
+--- orig/examples/audio/librimix/cluster/train_text_xattn_film_swap_6s.slurm	1970-01-01 08:00:00
++++ new/examples/audio/librimix/cluster/train_text_xattn_film_swap_6s.slurm	2026-06-17 15:16:46
+@@ -0,0 +1,47 @@
++#!/bin/bash
++# 6s token cross-attention + time-wise FiLM + swap loss probe.
++# Submit from login01:
++#   sbatch train_text_xattn_film_swap_6s.slurm
++#SBATCH --job-name=tse_xattn_film_swap
++#SBATCH --partition=gpu2node
++#SBATCH --gres=gpu:4
++#SBATCH --cpus-per-task=24
++#SBATCH --mem=64G
++#SBATCH --output=%x-%j.out
++
++set -euo pipefail
++echo "host=$(hostname)  start=$(date)"
++nvidia-smi -L
++
++export PATH="${HOME}/.conda/envs/wesep/bin:${PATH}"
++export PYTHONIOENCODING=UTF-8
++export PYTHONUNBUFFERED=1
++export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
++python -c "import torch; print('torch', torch.__version__, '| cuda', torch.cuda.is_available(), '| ngpu', torch.cuda.device_count())"
++
++ROOT="${HOME}/tse1"
++RECIPE="${ROOT}/wesep-real-tse/examples/audio/librimix"
++DATA="${ROOT}/libri_data/Libri2Mix/wav16k/min"
++EXP="${RECIPE}/exp/BSRNN_TEXT_XATTN_FILM_SWAP_6S_PROBE_R2"
++cd "${RECIPE}"
++
++export OMP_NUM_THREADS=6
++echo "[train] launching 4-GPU DDP: 6s xattn + time-wise FiLM + swap loss"
++
++torchrun --standalone --nnodes=1 --nproc_per_node=4 \
++  wesep/bin/train.py \
++  --config        confs/tse_bsrnn_text_xattn_film_swap_6s.yaml \
++  --exp_dir       "${EXP}" \
++  --gpus          "[0,1,2,3]" \
++  --num_epochs    5 \
++  --save_epoch_interval 1 \
++  --num_avg       2 \
++  --data_type     raw \
++  --train_data    "${DATA}/train-100-full/raw.list" \
++  --train_cues    "${DATA}/train-100-full/cues_text_oracle_token.yaml" \
++  --train_samples "${DATA}/train-100-full/samples.jsonl" \
++  --val_data      "${DATA}/dev/raw.list" \
++  --val_cues      "${DATA}/dev/cues_text_oracle_token.yaml" \
++  --val_samples   "${DATA}/dev/samples.jsonl"
++
++echo "done=$(date)  ckpts in ${EXP}/models"
+diff -ruN orig/examples/audio/librimix/confs/tse_bsrnn_text_xattn_film_swap_6s.yaml new/examples/audio/librimix/confs/tse_bsrnn_text_xattn_film_swap_6s.yaml
+--- orig/examples/audio/librimix/confs/tse_bsrnn_text_xattn_film_swap_6s.yaml	1970-01-01 08:00:00
++++ new/examples/audio/librimix/confs/tse_bsrnn_text_xattn_film_swap_6s.yaml	2026-06-17 15:16:23
+@@ -0,0 +1,100 @@
++# Probe: 6s token cross-attention with time-wise FiLM and swap loss.
++dataloader_args:
++  batch_size: 1
++  drop_last: true
++  num_workers: 4
++  pin_memory: true
++  prefetch_factor: 2
++
++dataset_args:
++  resample_rate: &sr 16000
++  sample_num_per_epoch: 512
++  shuffle: true
++  shuffle_args:
++    shuffle_size: 2500
++  chunk_len: 96000
++  noise_prob: 0
++  noise_lmdb_file: './data/musan/lmdb'
++  cues:
++    audio:
++      use: false
++      required: false
++    text:
++      use: true
++      required: true
++  cue_processing: { }
++
++enable_amp: true
++exp_dir: exp/BSRNN_TEXT_XATTN_FILM_SWAP_6S_PROBE
++gpus: '0,1,2,3'
++log_batch_interval: 20
++
++loss: SISDR
++loss_args:
++  swap_loss_weight: 0.2
++  swap_loss_margin: 0.5
++
++model:
++  tse_model: TSE_BSRNN_SPK
++model_args:
++  tse_model:
++    separator:
++      sr: *sr
++      win: 512
++      stride: 128
++      feature_dim: 128
++      num_repeat: 6
++      causal: False
++      nspk: 1
++    speaker:
++      features:
++        listen:
++          enabled: False
++        usef:
++          enabled: False
++        tfmap:
++          enabled: False
++        context:
++          enabled: False
++        spkemb:
++          enabled: False
++        textemb:
++          enabled: True
++          mode: cross_attn
++          text_dim: 384
++          atten_dim: 128
++          num_heads: 4
++          fusion: "timewise_film"
++          film_scale: 0.1
++          film_init_std: 0.0001
++          film_bound: true
++          mix_dim: 128
++
++model_init:
++  tse_model: null
++  discriminator: null
++  spk_model: null
++
++num_avg: 2
++num_epochs: 5
++
++optimizer:
++  tse_model: Adam
++optimizer_args:
++  tse_model:
++    lr: 0.00015
++    weight_decay: 0.00001
++
++clip_grad: 1.0
++save_epoch_interval: 1
++
++scheduler:
++  tse_model: ExponentialDecrease
++scheduler_args:
++  tse_model:
++    final_lr: 1.0e-05
++    initial_lr: 0.00015
++    warm_from_zero: true
++    warm_up_epoch: 1
++
++seed: 42
+diff -ruN orig/wesep/bin/train.py new/wesep/bin/train.py
+--- orig/wesep/bin/train.py	2026-06-17 15:15:09
++++ new/wesep/bin/train.py	2026-06-17 15:16:00
+@@ -108,6 +108,8 @@
+         ]],
+     )
+     loss_args = (loss_posi, loss_weight)
++    swap_loss_weight = configs["loss_args"].get("swap_loss_weight", 0.0)
++    swap_loss_margin = configs["loss_args"].get("swap_loss_margin", 0.5)
+ 
+     # dataset and dataloader
+     train_dataset = Dataset(
+@@ -278,6 +280,8 @@
+             log_batch_interval=configs["log_batch_interval"],
+             device=device,
+             se_loss_weight=loss_args,
++            swap_loss_weight=swap_loss_weight,
++            swap_loss_margin=swap_loss_margin,
+         )
+ 
+         val_loss, _ = executor.cv(
+@@ -351,4 +355,4 @@
+ 
+ 
+ if __name__ == "__main__":
+-    fire.Fire(train)
+\ No newline at end of file
++    fire.Fire(train)
+diff -ruN orig/wesep/modules/speaker/spk_frontend.py new/wesep/modules/speaker/spk_frontend.py
+--- orig/wesep/modules/speaker/spk_frontend.py	2026-06-17 15:15:09
++++ new/wesep/modules/speaker/spk_frontend.py	2026-06-17 15:15:30
+@@ -300,6 +300,52 @@
+         return self.fusionLayer(mix_repr, emb)  # or concat, configurable
+ 
+ 
++class TimeWiseFiLM(nn.Module):
++    """Frame-wise FiLM for cross-attended token cues."""
++
++    def __init__(
++        self,
++        embed_dim,
++        feat_dim,
++        scale=0.1,
++        init_std=0.0,
++        bound=True,
++    ):
++        super().__init__()
++        self.gamma_proj = nn.Linear(embed_dim, feat_dim)
++        self.beta_proj = nn.Linear(embed_dim, feat_dim)
++        self.scale = scale
++        self.bound = bound
++        self.init_weights(init_std)
++
++    def init_weights(self, init_std):
++        if init_std and init_std > 0:
++            nn.init.normal_(self.gamma_proj.weight, mean=0.0, std=init_std)
++            nn.init.normal_(self.beta_proj.weight, mean=0.0, std=init_std)
++        else:
++            nn.init.zeros_(self.gamma_proj.weight)
++            nn.init.zeros_(self.beta_proj.weight)
++        nn.init.zeros_(self.gamma_proj.bias)
++        nn.init.zeros_(self.beta_proj.bias)
++
++    def forward(self, x, embed):
++        if x.dim() == 3:
++            h = embed.transpose(1, 2)  # (B, T, E)
++            gamma = self.gamma_proj(h).transpose(1, 2)
++            beta = self.beta_proj(h).transpose(1, 2)
++        elif x.dim() == 4:
++            h = embed.transpose(2, 3)  # (B, band, T, E)
++            gamma = self.gamma_proj(h).transpose(2, 3)
++            beta = self.beta_proj(h).transpose(2, 3)
++        else:
++            raise ValueError(f"Unsupported x shape for TimeWiseFiLM: {x.shape}")
++
++        if self.bound:
++            gamma = torch.tanh(gamma)
++            beta = torch.tanh(beta)
++        return ((1.0 + self.scale * gamma) * x + self.scale * beta).contiguous()
++
++
+ class TextEmbFeature(BaseSpeakerFeature):
+     """Semantic text cue: precomputed (frozen-encoder) text embedding.
+ 
+@@ -324,21 +370,30 @@
+         text_dim = conf_text["text_dim"]  # e.g. 384 for MiniLM
+ 
+         if self.mode == "cross_attn":
++            atten_dim = conf_text.get("atten_dim", 128)
++            fusion = conf_text.get("fusion", "multiply")
+             self.attenFuse = CrossFuse(
+                 embed_dim=text_dim,
+-                atten_dim=conf_text.get("atten_dim", 128),
++                atten_dim=atten_dim,
+                 mix_dim=conf_text["mix_dim"],
+                 num_heads=conf_text.get("num_heads", 4),
+                 nband=conf_text["band"],
+                 batch_first=True,
+             )
+-            self.fusionLayer = SpeakerFuseLayer(
+-                embed_dim=conf_text.get("atten_dim", 128),
+-                feat_dim=conf_text["mix_dim"],
+-                # multiply/additive/concat operate per (band, time); FiLM does
+-                # not (it expects a single vector), so keep it out of this path.
+-                fuse_type=conf_text.get("fusion", "multiply"),
+-            )
++            if fusion in ("timewise_film", "FiLM"):
++                self.fusionLayer = TimeWiseFiLM(
++                    embed_dim=atten_dim,
++                    feat_dim=conf_text["mix_dim"],
++                    scale=conf_text.get("film_scale", 0.1),
++                    init_std=conf_text.get("film_init_std", 0.0),
++                    bound=conf_text.get("film_bound", True),
++                )
++            else:
++                self.fusionLayer = SpeakerFuseLayer(
++                    embed_dim=atten_dim,
++                    feat_dim=conf_text["mix_dim"],
++                    fuse_type=fusion,
++                )
+         elif self.mode == "vector":
+             proj_dim = conf_text.get("proj_dim", 192)  # match spk emb dim
+             hid_dim = conf_text.get("proj_hidden", 256)
+diff -ruN orig/wesep/utils/executor.py new/wesep/utils/executor.py
+--- orig/wesep/utils/executor.py	2026-06-17 15:15:09
++++ new/wesep/utils/executor.py	2026-06-17 15:15:47
+@@ -16,13 +16,14 @@
+ 
+ from contextlib import nullcontext
+ 
+-import tableprint as tp
+-import torch
++import tableprint as tp
++import torch
++import torch.nn.functional as F
++
++from wesep.utils.funcs import clip_gradients
++from wesep.dataset.collate import AUX_KEY_MAP
+ 
+-from wesep.utils.funcs import clip_gradients
+-from wesep.dataset.collate import AUX_KEY_MAP
+ 
+-
+ class Executor:
+ 
+     def __init__(self, aux_key_map=None):
+@@ -65,11 +66,25 @@
+         if len(cues) == 0:
+             cues = None
+ 
+-        return mix, cues, target
+-
++        return mix, cues, target
++
++    def _replace_text_cue(self, cues, text_cue):
++        if cues is None:
++            return None
++        replaced = False
++        out = []
++        for cue in cues:
++            is_audio = cue.dim() == 3 and cue.shape[1] == 1
++            if not is_audio and not replaced:
++                out.append(text_cue)
++                replaced = True
++            else:
++                out.append(cue)
++        return out if replaced else None
++
++    # -------------------------
++    # train
+     # -------------------------
+-    # train
+-    # -------------------------
+ 
+     def train(self,
+               dataloader,
+@@ -82,10 +97,12 @@
+               epoch,
+               enable_amp,
+               logger,
+-              clip_grad=5.0,
+-              log_batch_interval=100,
+-              device=torch.device("cuda"),
+-              se_loss_weight=1.0):
++              clip_grad=5.0,
++              log_batch_interval=100,
++              device=torch.device("cuda"),
++              se_loss_weight=1.0,
++              swap_loss_weight=0.0,
++              swap_loss_margin=0.5):
+ 
+         model = models[0]
+         optimizer = optimizers[0]
+@@ -126,14 +143,34 @@
+ 
+                     # ---- loss ----
+                     loss = 0.0
+-                    for ii in range(len(criterion)):
+-                        for ji in range(len(se_loss_weight[0][ii])):
+-                            out_idx = se_loss_weight[0][ii][ji]
+-                            w = se_loss_weight[1][ii][ji]
+-                            loss = loss + w * (criterion[ii](outputs[out_idx],
+-                                                             target).mean())
+-
+-                losses.append(loss.item())
++                    for ii in range(len(criterion)):
++                        for ji in range(len(se_loss_weight[0][ii])):
++                            out_idx = se_loss_weight[0][ii][ji]
++                            w = se_loss_weight[1][ii][ji]
++                            loss = loss + w * (criterion[ii](outputs[out_idx],
++                                                             target).mean())
++
++                    if swap_loss_weight > 0 and "text_aux" in batch:
++                        text_neg = batch["text_aux"].float().to(device)
++                        if text_neg.shape[0] > 1:
++                            text_neg = text_neg.roll(shifts=1, dims=0)
++                            neg_cues = self._replace_text_cue(cues, text_neg)
++                        else:
++                            neg_cues = None
++
++                        if neg_cues is not None:
++                            neg_outputs = model(mix, neg_cues)
++                            if not isinstance(neg_outputs, (list, tuple)):
++                                neg_outputs = [neg_outputs]
++                            neg_outputs = [o[..., :_L] for o in neg_outputs]
++                            pos_loss = criterion[0](outputs[0], target).mean()
++                            neg_loss = criterion[0](neg_outputs[0],
++                                                    target).mean()
++                            swap_loss = F.relu(
++                                swap_loss_margin + pos_loss - neg_loss)
++                            loss = loss + swap_loss_weight * swap_loss
++
++                losses.append(loss.item())
+                 total_loss_avg = sum(losses) / len(losses)
+ 
+                 # ---- backward ----
+@@ -223,4 +260,4 @@
+                     break
+ 
+         total_loss_avg = sum(losses) / len(losses)
+-        return total_loss_avg, 0
+\ No newline at end of file
++        return total_loss_avg, 0

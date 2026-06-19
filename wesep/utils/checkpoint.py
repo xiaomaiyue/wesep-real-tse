@@ -7,7 +7,18 @@ from wesep.utils.schedulers import BaseClass
 
 def load_pretrained_model(model: torch.nn.Module,
                           path: str,
-                          type: str = "generator"):
+                          type: str = "generator",
+                          strict: bool = False):
+    """Warm-start ``model`` from a pretrained checkpoint.
+
+    With ``strict=False`` (default) this performs a *partial* load: only the
+    checkpoint tensors whose name and shape match the target model are copied,
+    everything else (e.g. a different speaker/cue conditioning branch) is left
+    at its initialized value. This lets a text-cued model reuse the BSRNN
+    ``sep_model.*`` backbone from a speaker-embedding checkpoint while keeping
+    its own ``spk_ft.textemb.*`` path random. A summary is logged so you can
+    confirm the backbone actually transferred.
+    """
     assert type in ["generator", "discriminator"]
     states = torch.load(
         path,
@@ -19,12 +30,43 @@ def load_pretrained_model(model: torch.nn.Module,
         assert len(states["models"]) == 2
         state = states["models"][1]
 
-    if isinstance(model, torch.nn.DataParallel):
-        model.module.load_state_dict(state)
-    elif isinstance(model, torch.nn.parallel.DistributedDataParallel):
-        model.module.load_state_dict(state)
+    if isinstance(
+            model,
+        (torch.nn.DataParallel, torch.nn.parallel.DistributedDataParallel)):
+        target = model.module
     else:
-        model.load_state_dict(state)
+        target = model
+
+    if strict:
+        target.load_state_dict(state)
+        return
+
+    # strip a possible DDP "module." prefix from the checkpoint
+    state = {
+        (k[len("module."):] if k.startswith("module.") else k): v
+        for k, v in state.items()
+    }
+    model_sd = target.state_dict()
+    matched, shape_mismatch = {}, []
+    for k, v in state.items():
+        if k in model_sd:
+            if model_sd[k].shape == v.shape:
+                matched[k] = v
+            else:
+                shape_mismatch.append(k)
+    missing = [k for k in model_sd if k not in matched]
+    unused = [k for k in state if k not in model_sd]
+
+    target.load_state_dict(matched, strict=False)
+    print("[load_pretrained_model] partial warm-start from {}\n"
+          "  loaded={} | shape_mismatch={} | "
+          "model_keys_left_random={} | ckpt_keys_unused={}".format(
+              path, len(matched), len(shape_mismatch), len(missing),
+              len(unused)))
+    if shape_mismatch:
+        print("  [warn] shape mismatch (skipped): " +
+              ", ".join(shape_mismatch[:8]) +
+              (" ..." if len(shape_mismatch) > 8 else ""))
 
 
 def load_checkpoint(

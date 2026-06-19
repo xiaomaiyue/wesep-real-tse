@@ -161,7 +161,7 @@ def infer(config="confs/conf.yaml", **kwargs):
             SISNR1, delta1 = cal_SISNRi(ests[0], ref[0], mix[0])
 
             logger.info(
-                "Num={} | Utt={} | Target speaker={} | SI-SNR={:.2f} | SI-SNRi={:.2f}"
+                "Num={} | Utt={} | Target speaker={} | SI-SNR={:.6f} | SI-SNRi={:.6f}"
                 .format(total_cnt + 1, key[0], spk[0], SISNR1, delta1))
             total_SISNR += SISNR1
             total_SISNRi += delta1
@@ -171,7 +171,7 @@ def infer(config="confs/conf.yaml", **kwargs):
 
             SISNR2, delta2 = cal_SISNRi(ests[1], ref[1], mix[1])
             logger.info(
-                "Num={} | Utt={} | Target speaker={} | SI-SNR={:.2f} | SI-SNRi={:.2f}"
+                "Num={} | Utt={} | Target speaker={} | SI-SNR={:.6f} | SI-SNRi={:.6f}"
                 .format(total_cnt + 1, key[1], spk[1], SISNR2, delta2))
             total_SISNR += SISNR2
             total_SISNRi += delta2
@@ -185,8 +185,8 @@ def infer(config="confs/conf.yaml", **kwargs):
         generate_enahnced_scp(os.path.abspath(save_audio_dir), extension="wav")
 
     logger.info("Time Elapsed: {:.1f}s".format(end - start))
-    logger.info("Average SI-SNR: {:.2f}".format(total_SISNR / total_cnt))
-    logger.info("Average SI-SNRi: {:.2f}".format(total_SISNRi / total_cnt))
+    logger.info("Average SI-SNR: {:.6f}".format(total_SISNR / total_cnt))
+    logger.info("Average SI-SNRi: {:.6f}".format(total_SISNRi / total_cnt))
     logger.info(
         "Acceptance rate of Utterances with SI-SDRi > 1 dB: {:.2f}".format(
             accept_cnt / total_cnt * 100))

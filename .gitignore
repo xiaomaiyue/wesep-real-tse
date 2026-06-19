@@ -39,3 +39,10 @@ raw_wav
 tensorboard
 # **/*build*
 wespeaker_models
+
+# route-B / experiment artifacts (large or generated)
+models/
+*.pt
+exp/
+examples/audio/librimix/pretrained/
+a.txt

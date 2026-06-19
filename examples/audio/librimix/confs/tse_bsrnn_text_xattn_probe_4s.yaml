@@ -1,0 +1,95 @@
+# Probe: 4s chunk for token cross-attention text cue.
+dataloader_args:
+  batch_size: 2
+  drop_last: true
+  num_workers: 4
+  pin_memory: true
+  prefetch_factor: 2
+
+dataset_args:
+  resample_rate: &sr 16000
+  sample_num_per_epoch: 256
+  shuffle: true
+  shuffle_args:
+    shuffle_size: 2500
+  chunk_len: 64000
+  noise_prob: 0
+  noise_lmdb_file: './data/musan/lmdb'
+  cues:
+    audio:
+      use: false
+      required: false
+    text:
+      use: true
+      required: true
+  cue_processing: { }
+
+enable_amp: true
+exp_dir: exp/BSRNN_TEXT_XATTN_PROBE_4S
+gpus: '0'
+log_batch_interval: 20
+
+loss: SISDR
+loss_args: { }
+
+model:
+  tse_model: TSE_BSRNN_SPK
+model_args:
+  tse_model:
+    separator:
+      sr: *sr
+      win: 512
+      stride: 128
+      feature_dim: 128
+      num_repeat: 6
+      causal: False
+      nspk: 1
+    speaker:
+      features:
+        listen:
+          enabled: False
+        usef:
+          enabled: False
+        tfmap:
+          enabled: False
+        context:
+          enabled: False
+        spkemb:
+          enabled: False
+        textemb:
+          enabled: True
+          mode: cross_attn
+          text_dim: 384
+          atten_dim: 128
+          num_heads: 4
+          fusion: "multiply"
+          mix_dim: 128
+
+model_init:
+  tse_model: null
+  discriminator: null
+  spk_model: null
+
+num_avg: 2
+num_epochs: 5
+
+optimizer:
+  tse_model: Adam
+optimizer_args:
+  tse_model:
+    lr: 0.0003
+    weight_decay: 0.0001
+
+clip_grad: 1.0
+save_epoch_interval: 1
+
+scheduler:
+  tse_model: ExponentialDecrease
+scheduler_args:
+  tse_model:
+    final_lr: 1.0e-05
+    initial_lr: 0.0003
+    warm_from_zero: true
+    warm_up_epoch: 1
+
+seed: 42
