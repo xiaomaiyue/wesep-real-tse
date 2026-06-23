@@ -10,6 +10,7 @@ speakers). Pure separation; the text cue is applied later by ASR routing.
     --init <spk_emb_100/avg_model.pt> --epochs 40
 """
 import argparse
+import glob
 import json
 import os
 import random
@@ -23,8 +24,20 @@ from torch.utils.data import Dataset, DataLoader, DistributedSampler
 from wesep.modules.separator.bsrnn import BSRNN
 
 
+def _mix_at_snr(clean, noise, snr_db):
+    cp = clean.pow(2).mean()
+    npow = noise.pow(2).mean() + 1e-8
+    g = (cp / (10 ** (snr_db / 10.0)) / npow).sqrt()
+    return clean + noise * g
+
+
+def add_noise(w, snr_db):
+    return _mix_at_snr(w, torch.randn_like(w), snr_db)
+
+
 class SepData(Dataset):
-    def __init__(self, samples_jsonl, chunk=96000, sr=16000):
+    def __init__(self, samples_jsonl, chunk=96000, sr=16000,
+                 noise_prob=0.0, snr_min=0.0, snr_max=20.0, noise_dir=None):
         self.items = []
         with open(samples_jsonl) as f:
             for line in f:
@@ -37,6 +50,24 @@ class SepData(Dataset):
                                    d["src"][spks[1]][0]))
         self.chunk = chunk
         self.sr = sr
+        self.noise_prob = noise_prob
+        self.snr_min = snr_min
+        self.snr_max = snr_max
+        self.noise_paths = (sorted(glob.glob(
+            os.path.join(noise_dir, "**", "*.wav"), recursive=True))
+            if noise_dir else [])
+
+    def _real_noise(self, length):
+        n, sr = torchaudio.load(random.choice(self.noise_paths))
+        if sr != self.sr:
+            n = torchaudio.functional.resample(n, sr, self.sr)
+        n = n.mean(0)
+        if len(n) >= length:
+            st = random.randint(0, len(n) - length)
+            n = n[st:st + length]
+        else:
+            n = n.repeat(length // len(n) + 1)[:length]
+        return n
 
     def __len__(self):
         return len(self.items)
@@ -61,6 +92,12 @@ class SepData(Dataset):
             m = torch.nn.functional.pad(m, (0, pad))
             a = torch.nn.functional.pad(a, (0, pad))
             b = torch.nn.functional.pad(b, (0, pad))
+        if self.noise_prob > 0 and random.random() < self.noise_prob:
+            snr = random.uniform(self.snr_min, self.snr_max)
+            if self.noise_paths:
+                m = _mix_at_snr(m, self._real_noise(len(m)), snr)
+            else:
+                m = add_noise(m, snr)
         return m, torch.stack([a, b], 0)
 
 
@@ -93,6 +130,21 @@ def warmstart(model, ckpt, rank):
             len(keep), len(msd), len(msd) - len(keep)), flush=True)
 
 
+def warm_sep(model, ckpt, rank):
+    """Shape-matched partial load from a train_sep-format ckpt (ck['model']).
+    Lets a deeper/wider model inherit every matching layer (e.g. num_repeat
+    6->8 keeps separation.0..5, masks, band-split; only new blocks init fresh).
+    """
+    sd = torch.load(ckpt, map_location="cpu")["model"]
+    msd = model.state_dict()
+    keep = {k: v for k, v in sd.items()
+            if k in msd and msd[k].shape == v.shape}
+    model.load_state_dict(keep, strict=False)
+    if rank == 0:
+        print("[warm_sep] from {} loaded {}/{} (skipped {})".format(
+            ckpt, len(keep), len(msd), len(msd) - len(keep)), flush=True)
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--samples", required=True)
@@ -105,6 +157,15 @@ def main():
     ap.add_argument("--iters_per_epoch", type=int, default=600)
     ap.add_argument("--final_lr", type=float, default=2.5e-5)
     ap.add_argument("--resume", default=None)
+    ap.add_argument("--warm_sep", default=None,
+                    help="shape-matched partial load from a train_sep ckpt "
+                         "(for deeper/wider warm starts)")
+    ap.add_argument("--feature_dim", type=int, default=128)
+    ap.add_argument("--num_repeat", type=int, default=6)
+    ap.add_argument("--noise_prob", type=float, default=0.0)
+    ap.add_argument("--snr_min", type=float, default=0.0)
+    ap.add_argument("--snr_max", type=float, default=20.0)
+    ap.add_argument("--noise_dir", default=None)
     args = ap.parse_args()
 
     dist.init_process_group("nccl")
@@ -114,10 +175,13 @@ def main():
     torch.cuda.set_device(local)
     dev = torch.device("cuda", local)
 
-    model = BSRNN(sr=16000, win=512, stride=128, feature_dim=128,
-                  num_repeat=6, causal=False, nspk=2, spec_dim=2).to(dev)
+    model = BSRNN(sr=16000, win=512, stride=128, feature_dim=args.feature_dim,
+                  num_repeat=args.num_repeat, causal=False, nspk=2,
+                  spec_dim=2).to(dev)
     if args.init and not args.resume:
         warmstart(model, args.init, rank)
+    if args.warm_sep and not args.resume:
+        warm_sep(model, args.warm_sep, rank)
     model = DDP(model, device_ids=[local])
     opt = torch.optim.Adam(model.parameters(), lr=args.lr)
     scaler = torch.cuda.amp.GradScaler()
@@ -137,7 +201,9 @@ def main():
             print("[resume] from {} -> start epoch {}".format(
                 args.resume, start_epoch), flush=True)
 
-    ds = SepData(args.samples, chunk=args.chunk)
+    ds = SepData(args.samples, chunk=args.chunk, noise_prob=args.noise_prob,
+                 snr_min=args.snr_min, snr_max=args.snr_max,
+                 noise_dir=args.noise_dir)
     samp = DistributedSampler(ds, num_replicas=world, rank=rank, shuffle=True)
     dl = DataLoader(ds, batch_size=args.bs, sampler=samp, num_workers=4,
                     drop_last=True, pin_memory=True)

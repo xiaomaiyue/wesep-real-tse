@@ -1,0 +1,705 @@
+\documentclass[UTF8,zihao=-4]{ctexart}
+
+\usepackage[a4paper,margin=2.2cm]{geometry}
+\usepackage{fontspec}
+\usepackage{xeCJK}
+\usepackage{booktabs}
+\usepackage{longtable}
+\usepackage{tabularx}
+\usepackage{array}
+\usepackage{xcolor}
+\usepackage{hyperref}
+\usepackage{enumitem}
+\usepackage{amsmath}
+\usepackage{graphicx}
+\usepackage{titlesec}
+\usepackage{fancyhdr}
+\usepackage{lastpage}
+
+\IfFontExistsTF{Noto Serif CJK SC}{\setCJKmainfont{Noto Serif CJK SC}}{\setCJKmainfont{Songti SC}}
+\IfFontExistsTF{Noto Sans CJK SC}{\setCJKsansfont{Noto Sans CJK SC}}{\setCJKsansfont{PingFang SC}}
+\IfFontExistsTF{JetBrains Mono}{\setmonofont{JetBrains Mono}}{\setmonofont{Menlo}}
+
+\hypersetup{
+  colorlinks=true,
+  linkcolor=blue!55!black,
+  urlcolor=blue!55!black,
+  citecolor=blue!55!black,
+  pdftitle={Text-cued Target Speaker Extraction 实验总结},
+  pdfauthor={xiaomaiyue}
+}
+
+\definecolor{mainblue}{HTML}{1F4E79}
+\definecolor{softgray}{HTML}{F4F6F8}
+\definecolor{goodgreen}{HTML}{1F7A4D}
+\definecolor{warnorange}{HTML}{A55C00}
+
+\titleformat{\section}{\Large\bfseries\color{mainblue}}{\thesection}{0.8em}{}
+\titleformat{\subsection}{\large\bfseries}{\thesubsection}{0.8em}{}
+\titleformat{\subsubsection}{\normalsize\bfseries}{\thesubsubsection}{0.6em}{}
+
+\pagestyle{fancy}
+\fancyhf{}
+\lhead{Text-cued TSE 实验总结}
+\rhead{\thepage/\pageref{LastPage}}
+\renewcommand{\headrulewidth}{0.4pt}
+
+\setlist[itemize]{leftmargin=1.5em,itemsep=0.25em,topsep=0.25em}
+\setlist[enumerate]{leftmargin=1.8em,itemsep=0.25em,topsep=0.25em}
+\renewcommand{\arraystretch}{1.18}
+\newcommand{\code}[1]{\texttt{\detokenize{#1}}}
+\newcommand{\metric}[1]{\textbf{#1}}
+\newcommand{\good}[1]{\textcolor{goodgreen}{\textbf{#1}}}
+\newcommand{\warn}[1]{\textcolor{warnorange}{\textbf{#1}}}
+
+\title{\textbf{文本线索目标说话人提取（Text-cued TSE）\\实验历程、代码改动与结果总结}}
+\author{项目：\code{wesep-real-tse}\\整理日期：2026-06-23}
+\date{}
+
+\begin{document}
+\maketitle
+
+\begin{center}
+\fcolorbox{mainblue}{softgray}{
+\begin{minipage}{0.92\linewidth}
+\textbf{一句话主线：} 最终成功不是因为把文本更强行地注入分离器，而是把问题拆成
+\textbf{先无条件分离，再用文本路由}。端到端文本控制分离器会掉进 passthrough/对冲陷阱；
+PIT 分离器先把两个人拆开后，文本只需要做二选一，任务难度立刻降低。后续所有成功实验都围绕
+“更强的 separator、更稳的 router、更抗噪的训练分布”展开。
+\end{minipage}}
+\end{center}
+
+\tableofcontents
+\newpage
+
+\section{任务和评价指标}
+
+\subsection{任务定义}
+
+本项目做的是两人混音场景下的 \textbf{text-cued target speaker extraction}：
+给定一个混音音频，以及目标说话人所说内容的文字线索，模型需要输出目标说话人的干净语音。
+
+\begin{center}
+\fcolorbox{black!20}{softgray}{
+\begin{minipage}{0.88\linewidth}
+\centering
+\code{mixture} + \code{cue text}
+$\rightarrow$
+\code{target speech}
+\end{minipage}}
+\end{center}
+
+数据主要来自 LibriMix / Libri2Mix，16 kHz，2-speaker，min 模式。主干分离模型使用
+BSRNN。集群路径长期使用：
+\code{/share/home/maiyue/tse1/wesep-real-tse}。
+
+\subsection{核心指标怎么读}
+
+\begin{longtable}{p{0.22\linewidth}p{0.70\linewidth}}
+\toprule
+指标 & 含义 \\
+\midrule
+\metric{SI-SNRi} & 相对原混音的 SI-SNR 提升，单位 dB。越高越好；接近 0 表示几乎没分离。本文最核心指标。\\
+\metric{oracle ceiling} & separator 已经给出的两个候选里，如果总能选对那一路，能达到的最高 SI-SNRi。它衡量 separator 上限。\\
+\metric{routing accuracy} & router 是否选中了 oracle assignment 的那一路。它衡量文本路由能力。\\
+\metric{accept} & 输出 SI-SNRi 是否大于 1 dB 的比例，是一个粗略成功率。\\
+\metric{wrong-text ablation} & 把 cue 换成干扰说话人的文本后得到的 SI-SNRi。越低越说明模型真的受文本控制。\\
+\bottomrule
+\end{longtable}
+
+\subsection{最容易误解的一点：路由器不直接产生 dB}
+
+当 separator 的两个候选已经固定时，router 只是在候选 0 和候选 1 之间选择。
+因此只要 routing accuracy 接近 100\%，最终 SI-SNRi 就会接近 oracle ceiling。
+这也是为什么后期最大瓶颈逐渐变成 separator 本身，而不是 router。
+
+\section{总览：成功路线和最终结果}
+
+\subsection{最终成功的几种方法}
+
+\begin{table}[h]
+\centering
+\begin{tabularx}{\linewidth}{lrrrrX}
+\toprule
+方法 & clean & WHAM 5 dB & WHAM 0 dB & 是否显式 ASR & 定位 \\
+\midrule
+SEP\_LC + ASR 路由 & $\sim$18.80 & 14.50 & 13.92 & 是 & 强基线，直观但依赖 ASR decoding \\
+\textbf{SEP\_LC + MATCHER\_WHAM} & \textbf{18.80} & \textbf{14.53} & \textbf{14.14} & 否 & 当前最终最佳 \\
+SEP\_LC + XATTN noisy router & 18.79 & 14.34 & 13.79 & 否 & 新方向，有潜力但未超过 matcher \\
+SEP\_LC + 蒸馏小 matcher & 18.40 & 13.66 & 12.59 & 否 & 小而快，但泛化不足 \\
+\bottomrule
+\end{tabularx}
+\caption{目前真正成功的几条路线。单位均为 SI-SNRi dB。}
+\end{table}
+
+\subsection{一句话结论}
+
+\begin{itemize}
+  \item \textbf{路线 B（PIT separation + text routing）是主线成功点。}
+  \item \textbf{MATCHER\_WHAM 是目前最好结果。} 它去掉了显式 ASR decoding，WHAM 0 dB 达到 14.14 dB，接近 oracle ceiling 14.26 dB。
+  \item \textbf{XATTN router 的价值在于证明 cross-attention 不是没用，而是必须训练在 separator-output domain 上。}
+  \item \textbf{蒸馏 student 的价值在于轻量化，缺点是对未见噪声泛化差。}
+\end{itemize}
+
+\newpage
+\section{阶段一：端到端文本直接控制分离器为什么失败}
+
+\subsection{最初 idea}
+
+最自然的想法是：把文字 cue 编码成 embedding，再通过 cross-attention / FiLM 注入 BSRNN，
+让 separator 直接输出目标说话人。这个方向看起来最“端到端”，也最像官方 speaker embedding
+TSE 的文字版本。
+
+抽象流程是：
+\[
+\code{mixture} + \code{text cue}
+\rightarrow
+\code{text-conditioned separator}
+\rightarrow
+\code{target speech}
+\]
+
+\subsection{为什么这一步值得做}
+
+如果成功，系统会非常优雅：不需要先把两个人分开，也不需要后处理路由；文本直接驱动分离器。
+因此 R2--R8 反复尝试了从零训练、warm-start、冻结主干、解冻、dual-target、内容损失等变体。
+
+\subsection{实验结果}
+
+\begin{table}[h]
+\centering
+\begin{tabularx}{\linewidth}{llrrrX}
+\toprule
+轮次 & 设置 & oracle & interferer & accept & 结论 \\
+\midrule
+R2 & 从零 + FiLM + swap & -0.029 & -0.029 & 0\% & 忽略文本 \\
+R3 & 从零 + contrast + 强 FiLM & -0.043 & -0.043 & 0\% & 忽略文本 \\
+R4 & warm + 冻结主干 & -0.463 & -0.480 & 17.7\% & 会分离但乱猜 \\
+R5 & warm + 解冻 + dual-target & -0.0002 & -0.0002 & 0\% & 塌成 passthrough \\
+R6 & warm + 冻结 + dual-target & -0.047 & -0.051 & 0.75\% & cue 盲 \\
+R7 & warm + 解冻 + 内容损失 w=1 & $\approx$0 & -- & 0\% & 内容损失太弱 \\
+R8 & warm + 解冻 + 内容损失 w=10 & $\approx$0 & -- & 0\% & 对冲绕不过 \\
+\bottomrule
+\end{tabularx}
+\caption{端到端文本条件化分离器 R2--R8 结果。}
+\end{table}
+
+\subsection{失败根因}
+
+这个阶段最重要的收获不是某个模型失败，而是识别出 \textbf{passthrough / 对冲} 陷阱。
+当模型还不会根据文本判断目标是谁时，直接输出混音往往比赌错某个说话人更安全。
+对于 SI-SDR、内容 MSE、CTC-to-target 这类“输出 vs target”的损失，混音是一个很容易达到的局部最优。
+
+诊断结果显示：
+\begin{itemize}
+  \item 文本 embedding 本身可分，oracle 和 interferer 文本并不是混在一起。
+  \item cross-attention / FiLM 模块本身有响应，不同文本会导致中间调制量变化。
+  \item 但最终音频输出变化很小，说明主干要么把调制冲掉，要么直接学 passthrough。
+\end{itemize}
+
+\subsection{这一阶段的代码和文件}
+
+\begin{longtable}{p{0.30\linewidth}p{0.62\linewidth}}
+\toprule
+文件/位置 & 作用 \\
+\midrule
+\code{examples/audio/librimix/cluster/train_text_xattn_*} & 各种文本注入 BSRNN 的 Slurm 训练脚本。\\
+\code{examples/audio/librimix/cluster/eval_swap_xattn_*} & swap/interferer 文本评估脚本，用来判断 cue 是否真的生效。\\
+\code{OPTIMIZATION_JOURNEY.md} & 记录 R2--R8 的失败过程和诊断结论。\\
+\bottomrule
+\end{longtable}
+
+\subsection{导师复述版}
+
+端到端文本控制分离器失败，不是因为文本 embedding 完全没信息，而是训练目标给不出 bootstrap 梯度。
+模型在还不会听懂文本时，输出混音是一个低风险策略；一旦进入 passthrough，对调 loss 权重也很难救回来。
+因此下一步必须拆任务。
+
+\section{阶段二：路线 B，PIT 分离 + 文本路由}
+
+\subsection{核心 idea}
+
+把原任务拆成两个简单任务：
+\begin{enumerate}
+  \item \textbf{无条件 PIT separation：} 不看文本，先把两个人分成两路。
+  \item \textbf{text routing：} 用文本 cue 在两路输出中选目标。
+\end{enumerate}
+
+流程变成：
+\[
+\code{mixture}
+\rightarrow
+\code{PIT separator}
+\rightarrow
+\code{candidate 0, candidate 1}
+\rightarrow
+\code{text router}
+\rightarrow
+\code{target}
+\]
+
+\subsection{为什么这一步能绕过 passthrough}
+
+PIT separation 要求输出两个 clean sources，而不是一个目标。
+它的训练目标天然不允许“输出混音就过关”，因此避开了端到端 TSE 的对冲陷阱。
+文本路由则被降维成二选一：只要知道哪一路说的内容更像 cue，就可以选对。
+
+\subsection{主要代码改动}
+
+\begin{longtable}{p{0.30\linewidth}p{0.62\linewidth}}
+\toprule
+文件/位置 & 改动意义 \\
+\midrule
+\code{wesep/bin/train_sep.py:1} & 新增 standalone 2-speaker PIT separator trainer。\\
+\code{wesep/bin/train_sep.py:104} & 实现 SI-SNR 和 PIT loss，两种 speaker permutation 取更好的一种。\\
+\code{wesep/bin/train_sep.py:133} & \code{warm_sep}：从官方 speaker-embedding checkpoint 迁移 matching shape 的权重。\\
+\code{wesep/bin/train_sep.py:159} & 支持 \code{--resume} 和 \code{--warm_sep}，方便 clean $\rightarrow$ noisy $\rightarrow$ bigger/longer 逐步续训。\\
+\code{wesep/bin/eval_compare.py:70} & 统一评估 ASR route、matcher route、oracle ceiling 和 noisy 条件。\\
+\bottomrule
+\end{longtable}
+
+\subsection{ASR 路由结果}
+
+早期 route B 使用 ASR route：两路 separator 输出分别用 wav2vec2 ASR 转录，再和 cue text 比 CER，
+选择 CER 更低的一路。
+
+在 clean test 上，ckpt150 达到：
+\begin{itemize}
+  \item routed SI-SNRi：17.54 dB
+  \item accept：99.2\%
+  \item routing accuracy：99.5\%
+  \item wrong-text ablation：-37.9 dB
+\end{itemize}
+
+\subsection{阶段结论}
+
+这一步是项目转折点：从 R2--R8 的 $\approx$0 dB 直接跳到 17 dB 以上。
+它证明了“文本线索是可用的”，问题在于端到端训练方式，而不是任务本身无解。
+
+\section{阶段三：去掉显式 ASR，训练 MATCHER}
+
+\subsection{为什么要做 matcher}
+
+ASR route 很强，但它依赖显式转文字。下一步自然问题是：
+\begin{quote}
+能不能不先把语音转成文字，而是直接学习“语音内容”和“文本”的匹配？
+\end{quote}
+
+这就是双塔 matcher 的动机。
+
+\subsection{重要澄清：这里真的去掉 ASR 了吗？}
+
+准确说：\warn{去掉的是 ASR decoding，不是完全去掉 ASR-pretrained representation。}
+
+在代码中，matcher 的音频塔仍然使用
+\code{torchaudio.pipelines.WAV2VEC2_ASR_BASE_960H} 作为冻结特征提取器。
+但是推理时不再输出文字，也不计算 CER；只输出 audio embedding，与 text embedding 做相似度。
+
+\subsection{模型结构}
+
+\begin{itemize}
+  \item 音频塔：冻结 wav2vec2 $\rightarrow$ mean pooling $\rightarrow$ projection。
+  \item 文本塔：字符级 embedding $\rightarrow$ BiGRU $\rightarrow$ projection。
+  \item 损失：batch 内 InfoNCE，正确配对为正样本，其余为负样本。
+\end{itemize}
+
+\subsection{代码位置}
+
+\begin{longtable}{p{0.30\linewidth}p{0.62\linewidth}}
+\toprule
+文件/位置 & 作用 \\
+\midrule
+\code{wesep/bin/train_matcher.py:46} & \code{ATData}：读取 source audio 和对应文本，可加噪训练。\\
+\code{wesep/bin/train_matcher.py:121} & \code{AudioEnc}：wav2vec2 音频特征 + projection。\\
+\code{wesep/bin/train_matcher.py:134} & \code{TextEnc}：字符级 BiGRU 文本塔。\\
+\code{wesep/bin/train_matcher.py:210} & 对称 InfoNCE / cross entropy 训练目标。\\
+\code{wesep/bin/eval_matcher.py:84} & matcher routing 与 wrong-text ablation。\\
+\bottomrule
+\end{longtable}
+
+\subsection{matcher 训练结果}
+
+\begin{table}[h]
+\centering
+\begin{tabularx}{\linewidth}{lrrX}
+\toprule
+run & epochs & final loss / batch acc & 训练音频 \\
+\midrule
+MATCHER\_V1 & 60 & 1.02 / 0.70 & clean source \\
+MATCHER\_NOISY & 60 & 1.60 / 0.54 & synthetic noise \\
+\textbf{MATCHER\_WHAM} & 80 & 1.29 / 0.61 & real WHAM noise \\
+\bottomrule
+\end{tabularx}
+\caption{matcher 训练日志。batch acc 是 1-of-32 retrieval proxy，不等于最终 2-way routing accuracy。}
+\end{table}
+
+\subsection{优劣}
+
+\textbf{优点：}
+\begin{itemize}
+  \item 不需要显式 ASR 转录，推理链路比 ASR route 简洁。
+  \item 在 WHAM 噪声下与 ASR route 打平或更好。
+  \item 双塔结构可复用：同一个 matcher 可以服务不同 separator。
+\end{itemize}
+
+\textbf{缺点：}
+\begin{itemize}
+  \item 仍依赖 wav2vec2 ASR 预训练特征，不是完全摆脱 ASR 先验。
+  \item 双塔交互较浅，细粒度词帧对齐能力可能不如 cross-attention。
+  \item 对口音的真实鲁棒性还没有专门 benchmark，只能根据 wav2vec2 预训练和噪声实验做推断。
+\end{itemize}
+
+\section{阶段四：抗噪训练，真正把 WHAM 0 dB 做起来}
+
+\subsection{为什么要抗噪}
+
+clean-trained separator 和 matcher 在 clean 上很好，但一加噪声就崩。
+这说明噪声的主要伤害不只是 router 识别错，而是 separator 自身 oracle ceiling 大幅下降。
+
+\subsection{separator 优化阶梯}
+
+\begin{table}[h]
+\centering
+\begin{tabularx}{\linewidth}{lrrrX}
+\toprule
+模型 & clean & WHAM 5 dB & WHAM 0 dB & 说明 \\
+\midrule
+OLD nr6 / 6s & 18.30 & 13.76 / 13.54 & 12.64 / 12.54 & 早期噪声模型 \\
+BIG nr8 / 6s & 18.60 & 14.34 / 14.51 & 13.63 / 13.29 & 加深 BSRNN \\
+\textbf{LC nr8 / 10s} & \textbf{18.80} & \textbf{14.53 / 14.50} & \textbf{14.14 / 13.92} & 最终 separator \\
+\bottomrule
+\end{tabularx}
+\caption{separator ladder。5 dB / 0 dB 中为 matcher route / ASR route；oracle ceiling 略高。}
+\end{table}
+
+\subsection{关键训练策略}
+
+\begin{itemize}
+  \item 从 clean separator 续训到 real WHAM noise。
+  \item 从 nr6 加深到 nr8，提升强噪声分离能力。
+  \item chunk 从 6 s 加长到 10 s，让模型在低 SNR 下看到更长上下文。
+  \item WHAM final 使用 SNR $-5$ 到 20 dB 的更宽训练范围。
+\end{itemize}
+
+\subsection{相关代码位置}
+
+\begin{longtable}{p{0.30\linewidth}p{0.62\linewidth}}
+\toprule
+文件/位置 & 作用 \\
+\midrule
+\code{wesep/bin/train_sep.py:39} & \code{SepData} 支持 \code{noise_prob/snr_min/snr_max/noise_dir}。\\
+\code{wesep/bin/train_sep.py:95} & 训练时按随机 SNR 混入噪声。\\
+\code{wesep/bin/train_sep.py:164} & \code{--num_repeat} 控制 BSRNN 深度。\\
+\code{wesep/bin/train_sep.py:156} & \code{--chunk} 控制训练片段长度。\\
+\code{wesep/bin/eval_compare.py:74} & 评估时读取 held-out WHAM \code{tt} 噪声 split。\\
+\bottomrule
+\end{longtable}
+
+\subsection{阶段结论}
+
+抗噪训练是第二个决定性进展。clean route 已经接近 ceiling 后，继续提升主要靠 separator。
+WHAM 0 dB 下，最终 MATCHER\_WHAM 达到 14.14 dB，oracle ceiling 约 14.26 dB，
+说明路由几乎已经不是主要瓶颈。
+
+\section{阶段五：轻量化蒸馏 student matcher}
+
+\subsection{为什么要蒸馏}
+
+teacher matcher 仍然运行 wav2vec2，参数量大、推理成本高。
+蒸馏目标是让一个小 CNN 学到 teacher 的 audio embedding 空间，从而去掉 wav2vec2 依赖。
+
+\subsection{模型和损失}
+
+训练脚本 \code{wesep/bin/train_matcher_distill.py} 中写明：
+\[
+\mathcal{L}
+= (1 - \cos(\code{student}, \code{teacher}))
++ \lambda \cdot \code{InfoNCE}(\code{student audio}, \code{text})
+\]
+
+\begin{longtable}{p{0.30\linewidth}p{0.62\linewidth}}
+\toprule
+文件/位置 & 作用 \\
+\midrule
+\code{wesep/bin/train_matcher_distill.py:30} & \code{StudentAudioEnc} 小 CNN audio encoder。\\
+\code{wesep/bin/train_matcher_distill.py:39} & 使用 GroupNorm；避免 BatchNorm 在 batch=1 eval 时崩。\\
+\code{wesep/bin/train_matcher_distill.py:138} & 加载 wav2vec2 teacher。\\
+\code{wesep/bin/train_matcher_distill.py:213} & 保存 \code{kind=student_cnn}，eval 自动识别。\\
+\code{wesep/bin/diag_student.py:2} & 诊断 student 在 train/eval 模式下 embedding 是否一致。\\
+\bottomrule
+\end{longtable}
+
+\subsection{结果}
+
+\begin{table}[h]
+\centering
+\begin{tabularx}{\linewidth}{lrrrrX}
+\toprule
+router & params & clean & WHAM 5 dB & WHAM 0 dB & 结论 \\
+\midrule
+teacher wav2vec2 & 95M & 18.80 & 14.53 & 14.14 & 最强但重 \\
+student CNN + GroupNorm & 0.76M & 18.40 & 13.66 & 12.59 & 小、快，但掉点 \\
+\bottomrule
+\end{tabularx}
+\caption{蒸馏 matcher 结果。}
+\end{table}
+
+\subsection{优劣}
+
+\textbf{优点：}
+\begin{itemize}
+  \item 参数量约为 teacher 的 1/125。
+  \item 不需要 wav2vec2，部署潜力最大。
+  \item clean 下只落后 teacher 约 0.4 dB。
+\end{itemize}
+
+\textbf{缺点：}
+\begin{itemize}
+  \item WHAM 0 dB 落后 teacher 约 1.5 dB。
+  \item 对未见噪声类型泛化差；Gaussian stress test 下明显崩。
+  \item 说明小 CNN 学到了 WHAM-specific spectral shortcuts，还没有学到足够通用的语音内容表征。
+\end{itemize}
+
+\section{阶段六：Cross-attention router}
+
+\subsection{为什么重新尝试 cross-attention}
+
+双塔 matcher 很强，但它只在最终 embedding 层做相似度。
+cross-attention 的潜在优势是让 text tokens 直接 attend 到 audio frames，
+可能学到更细粒度的词级/帧级对齐。
+
+\subsection{第一版：clean-source XATTN router}
+
+第一版训练方式是让 router 在两个 clean source 中选目标。这个设置训练简单，但评估时 router 看到的是
+separator 输出，而不是 clean source，因此存在明显 domain gap。
+
+\begin{table}[h]
+\centering
+\begin{tabularx}{\linewidth}{lrrrX}
+\toprule
+条件 & SI-SNRi & accept & routing acc & 结论 \\
+\midrule
+clean eval & 9.019 & 83.0\% & 83.3\% & 有信号但远不够 \\
+WHAM 0 dB & 5.237 & 80.3\% & 80.0\% & domain gap 很明显 \\
+\bottomrule
+\end{tabularx}
+\caption{clean-source XATTN router 结果。}
+\end{table}
+
+\subsection{第二版：训练在 SEP outputs 上}
+
+关键改进：训练时也先把 mixture 送进 frozen SEP\_LC，得到两个 separated candidates。
+然后用 clean target source 计算两路候选的 SI-SNR，选择更好的一路作为 oracle label。
+
+\[
+\code{mixture}
+\rightarrow
+\code{frozen SEP\_LC}
+\rightarrow
+\code{candidate 0, candidate 1}
+\rightarrow
+\code{oracle SI-SNR label}
+\rightarrow
+\code{XATTN router}
+\]
+
+这样训练分布和评估分布一致，解决第一版最大的 domain gap。
+
+\subsection{第三版：noisy SEP candidates}
+
+进一步把训练 mixture 加 WHAM train noise，SNR 在 0--5 dB 随机，训练 router 直接适应 noisy separator outputs。
+这一步不是盲目多训，而是改变训练分布，让它看见最难的 0 dB/5 dB 场景。
+
+\subsection{XATTN 关键代码}
+
+\begin{longtable}{p{0.32\linewidth}p{0.60\linewidth}}
+\toprule
+文件/位置 & 作用 \\
+\midrule
+\code{wesep/bin/train_xattn_router.py:50} & clean-source router 数据集，后验证存在 domain gap。\\
+\code{wesep/bin/train_xattn_router.py:156} & 第一版 \code{XAttnRouter}。\\
+\code{wesep/bin/eval_xattn_router.py:156} & 输出 XATTN route SI-SNRi、routing accuracy、oracle ceiling。\\
+\code{wesep/bin/train_xattn_router_sep.py:64} & SEP-output router 数据集，可加入 WHAM 噪声。\\
+\code{wesep/bin/train_xattn_router_sep.py:164} & \code{SepXAttnRouter}。\\
+\code{wesep/bin/train_xattn_router_sep.py:176} & \code{base_scale} 初始化 matcher dot-product base。\\
+\code{wesep/bin/train_xattn_router_sep.py:180} & 从 \code{MATCHER_WHAM} 初始化 audio/text encoders。\\
+\code{wesep/bin/train_xattn_router_sep.py:185} & \code{--router_init}：从已有 SEP-router checkpoint 继续 noisy fine-tune。\\
+\code{wesep/bin/train_xattn_router_sep.py:209} & score = matcher base score + cross-attention residual。\\
+\code{wesep/bin/eval_xattn_router_sep.py:158} & 评估 routed SI-SNRi / accept / routing accuracy。\\
+\bottomrule
+\end{longtable}
+
+\subsection{XATTN 结果}
+
+\begin{table}[h]
+\centering
+\begin{tabularx}{\linewidth}{lrrrX}
+\toprule
+router checkpoint & clean & WHAM 5 dB & WHAM 0 dB & 说明 \\
+\midrule
+clean-source XATTN & 9.02 & -- & 5.24 & train clean source，eval separator output，domain gap 大 \\
+SEP-XATTN ep10 & 18.53 & 14.19 & 13.10 & 修正大部分 domain gap \\
+SEP-XATTN noisy ep20 & 18.69 & 14.35 & 13.47 & later epoch 不是最佳 \\
+\textbf{SEP-XATTN noisy ep11} & \textbf{18.79} & \textbf{14.34} & \textbf{13.79} & 最佳 XATTN checkpoint \\
+\textbf{MATCHER\_WHAM} & \textbf{18.80} & \textbf{14.53} & \textbf{14.14} & 仍是最终冠军 \\
+\bottomrule
+\end{tabularx}
+\caption{cross-attention router 与 matcher 比较。单位为 SI-SNRi dB。}
+\end{table}
+
+\subsection{XATTN 的优劣}
+
+\textbf{优点：}
+\begin{itemize}
+  \item 证明 cross-attention 有价值，只要训练分布对齐。
+  \item noisy SEP candidates 让 WHAM 0 dB 从 13.10 提到 13.79。
+  \item clean 上达到 oracle ceiling，wrong-text ablation 很低，说明文本控制真实存在。
+\end{itemize}
+
+\textbf{缺点：}
+\begin{itemize}
+  \item 训练复杂，需要在线跑 frozen separator。
+  \item 需要 early stopping；epoch 11 比 epoch 20 更好，说明盲目多训会漂移。
+  \item 目前仍未超过简单的 MATCHER\_WHAM。
+\end{itemize}
+
+\section{关于口音语音鲁棒性的判断}
+
+目前项目已有噪声鲁棒性实验，但没有专门的 accent benchmark。因此只能做基于结构的判断：
+
+\begin{itemize}
+  \item ASR route 对口音风险最高，因为它依赖完整转录和 CER。口音导致 ASR 错词时，路由可能错。
+  \item MATCHER\_WHAM 不输出文字，可能比 ASR decoding 更稳；但它仍使用 wav2vec2 ASR 预训练特征，口音偏差仍可能存在。
+  \item XATTN router 同样使用 wav2vec2 特征，不是天然解决口音问题；不过它可以通过 noisy/accent SEP candidates 继续训练。
+  \item Student CNN 是否抗口音最不确定，因为小模型容易学训练集捷径，需要专门数据验证。
+\end{itemize}
+
+建议后续做一个小型 accent stress test：
+\begin{enumerate}
+  \item 找 CommonVoice / L2-Arctic / accented LibriSpeech 子集。
+  \item 构造两人 mixture，保留文本 cue。
+  \item 固定 SEP\_LC，比较 ASR route、MATCHER\_WHAM、XATTN noisy router 的 routing accuracy。
+  \item 分别报告 clean accent、WHAM 5 dB accent、WHAM 0 dB accent。
+\end{enumerate}
+
+\section{目前最有希望的优化空间}
+
+\subsection{优先级 1：继续增强 separator}
+
+当前 MATCHER\_WHAM 在 WHAM 0 dB 为 14.14 dB，而 oracle ceiling 约为 14.26 dB。
+也就是说 router 只剩约 0.12 dB 空间，主要瓶颈已经是 separator。
+如果想要显著超过 14 dB，优先考虑：
+\begin{itemize}
+  \item 更强 separator backbone，例如 TF-GridNet、SepFormer、MossFormer 类结构。
+  \item 更多真实噪声、更多 room/reverb augmentation。
+  \item checkpoint averaging 或 EMA。
+  \item train-360 扩大训练数据。
+\end{itemize}
+
+\subsection{优先级 2：XATTN router 做 validation early stopping}
+
+noisy XATTN 的最佳 checkpoint 是 ep11，而 ep20 变差。
+这说明它不适合按 epoch 最后一个 checkpoint 取结果，应该固定一个 validation set：
+\begin{itemize}
+  \item 指标用 WHAM 0 dB routing accuracy 或 routed SI-SNRi。
+  \item 每个 epoch 后评估一个小 validation subset。
+  \item 自动保存 best checkpoint。
+\end{itemize}
+
+\subsection{优先级 3：matcher + XATTN score fusion}
+
+当前 matcher 稳，XATTN 有额外细粒度交互信号。可以不替换 matcher，而是融合：
+\[
+\code{score}
+= \code{matcher\_score}
++ \alpha \cdot \code{xattn\_residual}
+\]
+
+这条路的好处是风险低：matcher 作为强 base，XATTN 只提供修正项。
+事实上 \code{train_xattn_router_sep.py} 里已经有类似思想：
+\code{base_scale * base + residual}。
+后续可以把 base score 直接换成 frozen MATCHER\_WHAM 的分数，再只训练 residual。
+
+\subsection{优先级 4：Student 用混合噪声蒸馏}
+
+Student 最大短板是泛化。下一版蒸馏应加入：
+\begin{itemize}
+  \item WHAM + Gaussian + babble + DNS/noise bank。
+  \item 更宽 SNR，例如 $-5$ 到 20 dB。
+  \item separated-output domain 蒸馏，而不仅是 clean/noisy source audio。
+\end{itemize}
+
+\subsection{优先级 5：口音鲁棒性训练}
+
+如果导师关心 accent，下一步最好不是直接声称“抗口音”，而是做实验：
+\begin{itemize}
+  \item 先评估：ASR route vs matcher vs XATTN。
+  \item 再训练：把 accented speech 加入 matcher / XATTN router 的训练或 fine-tune。
+  \item 报告 routing accuracy，而不是只看 SI-SNRi，因为 separator 和 router 影响会混在一起。
+\end{itemize}
+
+\section{按时间线复述给导师}
+
+可以这样讲：
+
+\begin{enumerate}
+  \item 最初尝试端到端文本条件化分离器，用 cross-attention 和 FiLM 把文本注入 BSRNN。
+  但 R2--R8 都接近 0 dB。诊断发现模型容易输出混音，形成 passthrough/对冲最优解。
+  \item 因此改成路线 B：先用 PIT 做无条件两人分离，再用文本路由。这个拆解绕过 passthrough，
+  clean 上立刻达到约 17.5 dB，证明任务本身可行。
+  \item ASR route 虽然强，但依赖显式转文字。于是训练双塔 matcher，用 wav2vec2 特征和字符级文本塔做 InfoNCE。
+  这去掉了 ASR decoding，并在 WHAM 噪声下达到最终最好结果。
+  \item 噪声实验发现 clean-trained 模型不抗噪，瓶颈主要是 separator ceiling。因此连续做 real WHAM noise training、
+  加深 BSRNN、加长 chunk，最终得到 SEP\_LC。
+  \item 为了轻量化，做了 CNN student 蒸馏，证明小模型可行，但未见噪声泛化不足。
+  \item 最后重新尝试 cross-attention router。第一版用 clean source 训练，测试在 separator output 上，有 domain gap。
+  改成训练时也过 SEP\_LC，并用 oracle SI-SNR assignment 产生 label 后大幅提升；
+  再加入 noisy SEP candidates，WHAM 0 dB 提到 13.79，但仍未超过 MATCHER\_WHAM。
+\end{enumerate}
+
+\section{复现实验与 checkpoint 索引}
+
+\begin{longtable}{p{0.32\linewidth}p{0.60\linewidth}}
+\toprule
+对象 & 路径/说明 \\
+\midrule
+最终 separator & \code{examples/audio/librimix/exp/SEP_LC/models/ckpt_100.pt} \\
+最终 matcher & \code{examples/audio/librimix/exp/MATCHER_WHAM/models/matcher_80.pt} \\
+最佳 XATTN noisy router & \code{examples/audio/librimix/exp/XATTN_ROUTER_SEP_NOISY_FT_0_5/models/xattn_router_sep_11.pt} \\
+separator 训练脚本 & \code{wesep/bin/train_sep.py} \\
+matcher 训练脚本 & \code{wesep/bin/train_matcher.py} \\
+student 蒸馏脚本 & \code{wesep/bin/train_matcher_distill.py} \\
+XATTN SEP-router 训练脚本 & \code{wesep/bin/train_xattn_router_sep.py} \\
+统一比较评估 & \code{wesep/bin/eval_compare.py} \\
+XATTN SEP-router 评估 & \code{wesep/bin/eval_xattn_router_sep.py} \\
+\bottomrule
+\end{longtable}
+
+\subsection{关键集群任务}
+
+\begin{longtable}{p{0.18\linewidth}p{0.30\linewidth}p{0.42\linewidth}}
+\toprule
+job id & 名称 & 说明 \\
+\midrule
+23082 & \code{xattn_dot} & SEP-output XATTN，clean candidate training，2 GPU，10 epochs。\\
+23083--23085 & eval & clean / WHAM 0 dB / WHAM 5 dB 评估。\\
+23093 & \code{xattn_nft} & noisy SEP candidates fine-tune，2 GPU，20 epochs。\\
+23107--23109 & eval ep20 & noisy ep20 的 clean / WHAM5 / WHAM0 评估。\\
+23110--23111 & eval mid & ep11、ep17 的 WHAM0 补评。\\
+23112--23113 & eval ep11 & ep11 的 clean / WHAM5 补评。\\
+\bottomrule
+\end{longtable}
+
+\section{最后的判断}
+
+如果这份工作要对外讲清楚，最稳的 claim 是：
+
+\begin{quote}
+本文发现 text-cued TSE 的关键难点不是文本表示不可用，而是端到端文本条件化分离器容易陷入
+passthrough/对冲。将任务拆成 PIT separation + text routing 后，系统稳定成功。
+在此基础上，通过 real WHAM noise training、加深 BSRNN、加长 chunk 获得强抗噪 separator；
+通过 MATCHER\_WHAM 去掉显式 ASR decoding，达到当前最优 WHAM 0 dB 14.14 dB；
+通过 SEP-output cross-attention router 证明细粒度 text-audio 交互有潜力，但目前仍略低于双塔 matcher。
+\end{quote}
+
+\end{document}
